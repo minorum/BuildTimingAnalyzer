@@ -1,0 +1,6 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/BuildTimeAnalyzer.TUI/BuildTimeAnalyzer.TUI.csproj" />
+    <Project Path="src/BuildTimeAnalyzer.Tests/BuildTimeAnalyzer.Tests.csproj" />
+  </Folder>
+</Solution>
