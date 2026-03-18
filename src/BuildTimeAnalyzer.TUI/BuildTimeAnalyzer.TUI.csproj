@@ -5,6 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>BuildTimeAnalyzer</RootNamespace>
+    <PublishAot>true</PublishAot>
 
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>btanalyzer</ToolCommandName>

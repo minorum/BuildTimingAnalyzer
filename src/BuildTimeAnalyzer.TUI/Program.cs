@@ -1,7 +1,9 @@
 using BuildTimeAnalyzer.Commands;
 using Spectre.Console.Cli;
 
+#pragma warning disable IL3050 // Spectre.Console.Cli uses reflection but works correctly under AOT
 var app = new CommandApp<BuildCommand>();
+#pragma warning restore IL3050
 
 app.Configure(config =>
 {
