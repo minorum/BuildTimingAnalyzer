@@ -8,6 +8,8 @@ public static class ConsoleReportRenderer
     {
         RenderSummary(report);
         Console.WriteLine();
+        RenderTimeline(report);
+        Console.WriteLine();
         RenderProjectsTable(report, topN);
         Console.WriteLine();
         RenderTargetsTable(report);
@@ -96,6 +98,79 @@ public static class ConsoleReportRenderer
             Console.WriteLine($"  {rank,-4} {name.PadRight(nameWidth)}  {proj.PadRight(projWidth)}  {FormatDuration(t.Duration),10}  {t.Percentage,7:F1}%  {bar,-20}");
             rank++;
         }
+    }
+
+    // ──────────────────────────── Timeline ─────────────────────────────
+
+    private static void RenderTimeline(BuildReport report)
+    {
+        if (report.Projects.Count == 0) return;
+
+        Console.WriteLine("  Build Timeline");
+        Console.WriteLine();
+
+        var totalMs = report.TotalDuration.TotalMilliseconds;
+        if (totalMs <= 0) return;
+
+        // Sort by start offset for a natural timeline view
+        var projects = report.Projects.OrderBy(p => p.StartOffset).ToList();
+
+        var nameWidth = Math.Max(7, projects.Max(p => p.Name.Length));
+        nameWidth = Math.Min(nameWidth, 25);
+        const int barWidth = 50;
+        var pad = "".PadRight(nameWidth);
+
+        // Time axis — place labels at evenly spaced ticks
+        var tickCount = 5;
+        var tickSpacing = barWidth / (tickCount - 1);
+        var labels = new string[tickCount];
+        for (int i = 0; i < tickCount; i++)
+            labels[i] = FormatDuration(TimeSpan.FromMilliseconds(totalMs * i / (tickCount - 1)));
+
+        // Right-align the last label so it doesn't overflow
+        var axisChars = new char[barWidth];
+        Array.Fill(axisChars, ' ');
+        for (int i = 0; i < tickCount - 1; i++)
+        {
+            var pos = i * tickSpacing;
+            for (int j = 0; j < labels[i].Length && pos + j < barWidth; j++)
+                axisChars[pos + j] = labels[i][j];
+        }
+        // Last label right-aligned to end of bar
+        var last = labels[^1];
+        var lastStart = barWidth - last.Length;
+        for (int j = 0; j < last.Length; j++)
+            axisChars[lastStart + j] = last[j];
+
+        Console.WriteLine($"  {pad}  {new string(axisChars)}");
+
+        var tickChars = new char[barWidth];
+        Array.Fill(tickChars, '-');
+        for (int i = 0; i < tickCount; i++)
+        {
+            var pos = Math.Min(i * tickSpacing, barWidth - 1);
+            tickChars[pos] = '|';
+        }
+        Console.WriteLine($"  {pad}  {new string(tickChars)}");
+
+        // Render each project bar
+        foreach (var p in projects)
+        {
+            var startPos = (int)Math.Round(p.StartOffset.TotalMilliseconds / totalMs * barWidth);
+            var endPos = (int)Math.Round(p.EndOffset.TotalMilliseconds / totalMs * barWidth);
+            startPos = Math.Clamp(startPos, 0, barWidth - 1);
+            endPos = Math.Clamp(endPos, startPos + 1, barWidth);
+
+            var bar = new char[barWidth];
+            Array.Fill(bar, ' ');
+            for (int i = startPos; i < endPos; i++)
+                bar[i] = '#';
+
+            var name = p.Name.Length > nameWidth ? p.Name[..nameWidth] : p.Name;
+            Console.WriteLine($"  {name.PadRight(nameWidth)}  {new string(bar)}  {FormatDuration(p.EndOffset - p.StartOffset)}");
+        }
+
+        Console.WriteLine();
     }
 
     // ──────────────────────────── Analysis ───────────────────────────

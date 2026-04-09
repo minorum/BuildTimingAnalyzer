@@ -36,6 +36,8 @@ public sealed class BuildAnalyzerTests
             ErrorCount = 0,
             WarningCount = warningCount,
             Percentage = percentage,
+            StartOffset = TimeSpan.Zero,
+            EndOffset = TimeSpan.FromSeconds(seconds),
         };
 
     private static TargetTiming CreateTarget(string name, string project, double seconds, double percentage) =>

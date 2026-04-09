@@ -192,7 +192,9 @@ public sealed class LogAnalyzer
             .Select(kv => (
                 InstanceId: kv.Key,
                 Acc: kv.Value,
-                ExclusiveTime: exclusiveProjectTimes.GetValueOrDefault(kv.Key)
+                ExclusiveTime: exclusiveProjectTimes.GetValueOrDefault(kv.Key),
+                StartOffset: kv.Value.StartTime - buildStart,
+                EndOffset: kv.Value.EndTime - buildStart
             ))
             .Where(x => x.ExclusiveTime > TimeSpan.FromMilliseconds(1))
             .GroupBy(x => x.Acc.FullPath)
@@ -208,6 +210,8 @@ public sealed class LogAnalyzer
                     ErrorCount = g.Sum(x => x.Acc.ErrorCount),
                     WarningCount = g.Sum(x => x.Acc.WarningCount),
                     Percentage = totalMs > 0 ? best.ExclusiveTime.TotalMilliseconds / totalMs * 100 : 0,
+                    StartOffset = best.StartOffset,
+                    EndOffset = best.EndOffset,
                 };
             })
             .OrderByDescending(p => p.Duration)

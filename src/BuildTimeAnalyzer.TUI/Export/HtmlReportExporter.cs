@@ -88,6 +88,43 @@ public static class HtmlReportExporter
 </div>
 """);
 
+        // Timeline
+        if (report.Projects.Count > 0 && report.TotalDuration.TotalMilliseconds > 0)
+        {
+            sb.AppendLine("<h2>📅 Build Timeline</h2>");
+            sb.AppendLine("<div class=\"analysis\" style=\"overflow-x:auto\">");
+            var totalMs = report.TotalDuration.TotalMilliseconds;
+            var timelineProjects = report.Projects.OrderBy(p => p.StartOffset).ToList();
+            foreach (var p in timelineProjects)
+            {
+                var leftPct = p.StartOffset.TotalMilliseconds / totalMs * 100;
+                var widthPct = Math.Max(0.5, (p.EndOffset - p.StartOffset).TotalMilliseconds / totalMs * 100);
+                var barClass = p.Percentage > 50 ? "bar-high" : p.Percentage > 20 ? "bar-mid" : "bar-low";
+                sb.AppendLine($"""
+<div style="display:flex; align-items:center; margin:3px 0; font-size:0.85rem">
+  <span style="width:200px; flex-shrink:0; text-align:right; padding-right:12px; color:var(--muted)">{Esc(p.Name)}</span>
+  <div style="flex:1; height:18px; position:relative; background:#21262d; border-radius:3px">
+    <div class="bar-fill {barClass}" style="position:absolute; left:{leftPct:F1}%; width:{widthPct:F1}%; height:100%; border-radius:3px" title="{Esc(p.Name)}: {Esc(ConsoleReportRenderer.FormatDuration(p.EndOffset - p.StartOffset))}"></div>
+  </div>
+  <span style="width:70px; flex-shrink:0; padding-left:8px; font-size:0.8rem; color:var(--muted)">{Esc(ConsoleReportRenderer.FormatDuration(p.EndOffset - p.StartOffset))}</span>
+</div>
+""");
+            }
+            // Time axis labels
+            sb.AppendLine("""<div style="display:flex; align-items:center; margin-top:6px; font-size:0.75rem; color:var(--muted)">""");
+            sb.AppendLine("""<span style="width:200px; flex-shrink:0"></span>""");
+            sb.AppendLine("""<div style="flex:1; display:flex; justify-content:space-between">""");
+            for (int i = 0; i <= 4; i++)
+            {
+                var t = ConsoleReportRenderer.FormatDuration(TimeSpan.FromMilliseconds(totalMs * i / 4));
+                sb.AppendLine($"<span>{Esc(t)}</span>");
+            }
+            sb.AppendLine("</div>");
+            sb.AppendLine("""<span style="width:70px; flex-shrink:0"></span>""");
+            sb.AppendLine("</div>");
+            sb.AppendLine("</div>");
+        }
+
         // Projects table
         sb.AppendLine("<h2>⏱ Top Projects by Duration</h2>");
         sb.AppendLine("<table><thead><tr><th class=\"right\">#</th><th>Project</th><th class=\"right\">Duration</th><th class=\"right\">% of Build</th><th>Share</th><th class=\"right\">Errors</th><th class=\"right\">Warnings</th></tr></thead><tbody>");

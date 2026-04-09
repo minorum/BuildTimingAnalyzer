@@ -22,6 +22,8 @@ public sealed record ProjectTiming
     public required int ErrorCount { get; init; }
     public required int WarningCount { get; init; }
     public double Percentage { get; init; }
+    public required TimeSpan StartOffset { get; init; }
+    public required TimeSpan EndOffset { get; init; }
 }
 
 public sealed record TargetTiming

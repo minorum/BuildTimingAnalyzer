@@ -17,6 +17,8 @@ public sealed class HtmlReportExporterTests
             ErrorCount = succeeded ? 0 : 2,
             WarningCount = 3,
             Percentage = 62.5,
+            StartOffset = TimeSpan.Zero,
+            EndOffset = TimeSpan.FromSeconds(12.5),
         };
 
         return new BuildReport
@@ -124,6 +126,8 @@ public sealed class HtmlReportExporterTests
             ErrorCount = 0,
             WarningCount = 0,
             Percentage = 100,
+            StartOffset = TimeSpan.Zero,
+            EndOffset = TimeSpan.FromSeconds(5),
         };
 
         var report = new BuildReport

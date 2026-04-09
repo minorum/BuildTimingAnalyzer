@@ -18,6 +18,8 @@ public sealed class JsonReportExporterTests
             ErrorCount = 0,
             WarningCount = 3,
             Percentage = 62.5,
+            StartOffset = TimeSpan.Zero,
+            EndOffset = TimeSpan.FromSeconds(12.5),
         };
 
         var target = new TargetTiming
