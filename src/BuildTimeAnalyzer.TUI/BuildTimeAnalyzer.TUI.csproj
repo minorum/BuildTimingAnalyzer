@@ -27,6 +27,11 @@
     <PackageReference Include="MSBuild.StructuredLogger" />
   </ItemGroup>
 
+  <ItemGroup>
+    <TrimmerRootAssembly Include="Microsoft.Build.Framework" />
+    <TrimmerRootAssembly Include="StructuredLogger" />
+  </ItemGroup>
+
   <Target Name="GenerateVersionInfo" BeforeTargets="CoreCompile">
     <PropertyGroup>
       <_VersionInfoContent>
