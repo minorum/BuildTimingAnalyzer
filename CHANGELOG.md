@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.4
+
+- Fix AOT crash when analyzing binlogs — preserve MSBuild.Framework types from trimming
+- Include version in release archive filenames
+
 ## 0.0.3
 
 - Remove Spectre.Console dependency entirely for full AOT compatibility
