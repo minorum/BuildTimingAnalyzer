@@ -48,18 +48,18 @@ jobs:
 
       - name: Archive (Linux/macOS)
         if: runner.os != 'Windows'
-        run: tar -czf btanalyzer-${{ matrix.rid }}.tar.gz -C ./publish .
+        run: tar -czf btanalyzer-${{ matrix.rid }}-${{ github.ref_name }}.tar.gz -C ./publish .
 
       - name: Archive (Windows)
         if: runner.os == 'Windows'
-        run: Compress-Archive -Path ./publish/* -DestinationPath btanalyzer-${{ matrix.rid }}.zip
+        run: Compress-Archive -Path ./publish/* -DestinationPath btanalyzer-${{ matrix.rid }}-${{ github.ref_name }}.zip
         shell: pwsh
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: btanalyzer-${{ matrix.rid }}
-          path: btanalyzer-${{ matrix.rid }}.*
+          name: btanalyzer-${{ matrix.rid }}-${{ github.ref_name }}
+          path: btanalyzer-${{ matrix.rid }}-${{ github.ref_name }}.*
 
   release:
     needs: build
