@@ -183,6 +183,23 @@ public sealed class LogAnalyzer
                 g => TimeSpan.FromMilliseconds(g.Sum(t => t.ExclusiveDuration.TotalMilliseconds))
             );
 
+        // ── Compute actual work spans from target execution times ──────
+        // Project instances are created early for dependency resolution, so their
+        // start/end times don't reflect when work actually happened. Use the first
+        // target start and last target end per project path instead.
+        var instanceToPath = projectTimings.ToDictionary(kv => kv.Key, kv => kv.Value.FullPath);
+        var projectWorkSpans = completedTargets
+            .Where(t => t.ExclusiveDuration > TimeSpan.Zero)
+            .Where(t => instanceToPath.TryGetValue(t.ProjectInstanceId, out _))
+            .GroupBy(t => instanceToPath[t.ProjectInstanceId])
+            .ToDictionary(
+                g => g.Key,
+                g => (
+                    First: g.Min(t => t.StartTime) - buildStart,
+                    Last: g.Max(t => t.EndTime) - buildStart
+                )
+            );
+
         // ── Build per-project list ─────────────────────────────────────
         // Filter out solution metaprojects (they're orchestration, not real projects).
         var projectList = projectTimings
@@ -192,15 +209,14 @@ public sealed class LogAnalyzer
             .Select(kv => (
                 InstanceId: kv.Key,
                 Acc: kv.Value,
-                ExclusiveTime: exclusiveProjectTimes.GetValueOrDefault(kv.Key),
-                StartOffset: kv.Value.StartTime - buildStart,
-                EndOffset: kv.Value.EndTime - buildStart
+                ExclusiveTime: exclusiveProjectTimes.GetValueOrDefault(kv.Key)
             ))
             .Where(x => x.ExclusiveTime > TimeSpan.FromMilliseconds(1))
             .GroupBy(x => x.Acc.FullPath)
             .Select(g =>
             {
                 var best = g.OrderByDescending(x => x.ExclusiveTime).First();
+                var span = projectWorkSpans.GetValueOrDefault(best.Acc.FullPath);
                 return new ProjectTiming
                 {
                     Name = best.Acc.Name,
@@ -210,8 +226,8 @@ public sealed class LogAnalyzer
                     ErrorCount = g.Sum(x => x.Acc.ErrorCount),
                     WarningCount = g.Sum(x => x.Acc.WarningCount),
                     Percentage = totalMs > 0 ? best.ExclusiveTime.TotalMilliseconds / totalMs * 100 : 0,
-                    StartOffset = best.StartOffset,
-                    EndOffset = best.EndOffset,
+                    StartOffset = span.First,
+                    EndOffset = span.Last,
                 };
             })
             .OrderByDescending(p => p.Duration)
