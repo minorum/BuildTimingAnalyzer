@@ -1,11 +1,9 @@
 using System.Diagnostics;
-using Spectre.Console;
 
 namespace BuildTimeAnalyzer.Services;
 
 public sealed class BuildRunner
 {
-    /// <summary>Runs dotnet build with binary log output. Returns exit code and path to .binlog file.</summary>
     public async Task<(int ExitCode, string BinLogPath)> RunAsync(
         string projectPath,
         string configuration,
@@ -30,8 +28,8 @@ public sealed class BuildRunner
             UseShellExecute = false,
         };
 
-        AnsiConsole.MarkupLine($"[grey]Running:[/] [bold]dotnet {string.Join(" ", args)}[/]");
-        AnsiConsole.WriteLine();
+        Console.WriteLine($"Running: dotnet {string.Join(" ", args)}");
+        Console.WriteLine();
 
         using var process = new Process { StartInfo = psi };
 
@@ -44,7 +42,7 @@ public sealed class BuildRunner
         process.ErrorDataReceived += (_, e) =>
         {
             if (e.Data is null) return;
-            AnsiConsole.MarkupLineInterpolated($"[red]{Markup.Escape(e.Data)}[/]");
+            Console.Error.WriteLine(e.Data);
         };
 
         process.Start();
@@ -53,34 +51,41 @@ public sealed class BuildRunner
 
         await process.WaitForExitAsync(ct);
 
-        AnsiConsole.WriteLine();
+        Console.WriteLine();
         return (process.ExitCode, binLogPath);
     }
 
     private static void PrintBuildLine(string line)
     {
-        // Colour-code common MSBuild output patterns
         if (line.Contains(": error ", StringComparison.OrdinalIgnoreCase) ||
             line.StartsWith("Error", StringComparison.OrdinalIgnoreCase))
         {
-            AnsiConsole.MarkupLineInterpolated($"[red]{Markup.Escape(line)}[/]");
+            WriteColored(line, ConsoleColor.Red);
         }
         else if (line.Contains(": warning ", StringComparison.OrdinalIgnoreCase) ||
                  line.StartsWith("Warning", StringComparison.OrdinalIgnoreCase))
         {
-            AnsiConsole.MarkupLineInterpolated($"[yellow]{Markup.Escape(line)}[/]");
+            WriteColored(line, ConsoleColor.Yellow);
         }
         else if (line.StartsWith("Build succeeded", StringComparison.OrdinalIgnoreCase))
         {
-            AnsiConsole.MarkupLineInterpolated($"[bold green]{Markup.Escape(line)}[/]");
+            WriteColored(line, ConsoleColor.Green);
         }
         else if (line.StartsWith("Build FAILED", StringComparison.OrdinalIgnoreCase))
         {
-            AnsiConsole.MarkupLineInterpolated($"[bold red]{Markup.Escape(line)}[/]");
+            WriteColored(line, ConsoleColor.Red);
         }
         else
         {
-            AnsiConsole.MarkupLineInterpolated($"[grey]{Markup.Escape(line)}[/]");
+            Console.WriteLine(line);
         }
+    }
+
+    private static void WriteColored(string text, ConsoleColor color)
+    {
+        var prev = Console.ForegroundColor;
+        Console.ForegroundColor = color;
+        Console.WriteLine(text);
+        Console.ForegroundColor = prev;
     }
 }

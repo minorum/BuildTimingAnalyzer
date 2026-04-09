@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.3
+
+- Remove Spectre.Console dependency entirely for full AOT compatibility
+- Replace CLI framework with manual arg parsing (zero reflection)
+- Replace rich console tables with plain-text formatted output
+
 ## 0.0.2
 
 - Rename executable from `BuildTimeAnalyzer.TUI` to `btanalyzer`

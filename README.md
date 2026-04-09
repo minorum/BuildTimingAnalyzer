@@ -62,7 +62,7 @@ btanalyzer build --keep-log
 
 ## Output formats
 
-- **Console** -- Rich ANSI-colored tables and panels via Spectre.Console
+- **Console** -- Formatted tables with colored build output
 - **HTML** -- Self-contained dark-themed report with severity coloring
 - **JSON** -- Machine-readable output (AOT-compatible source-generated serialization)
 

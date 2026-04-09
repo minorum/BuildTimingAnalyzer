@@ -32,25 +32,25 @@ dotnet publish src/BuildTimeAnalyzer.TUI -c Release
 
 ## Architecture
 
-Command-based pipeline using **Spectre.Console.Cli**:
+CLI pipeline with manual argument parsing (no framework dependencies beyond MSBuild.StructuredLogger):
 
-1. **Commands/** — `BuildCommand` orchestrates the full pipeline; `BuildCommandSettings` defines CLI args with Spectre attributes
-2. **Services/** — `BuildRunner` executes `dotnet build -bl`; `LogAnalyzer` stream-parses the `.binlog` using `BinLogReader.ReadRecords()` (memory-efficient, does not load the full build tree)
-3. **Models/** — Immutable record types (`BuildReport`, `ProjectTiming`, `TargetTiming`) with required/init properties
-4. **Rendering/** — `ConsoleReportRenderer` displays results via Spectre.Console tables/panels
-5. **Export/** — `HtmlReportExporter` and `JsonReportExporter` generate output files
+1. **Program.cs** — Entry point with arg parsing for top-level commands (`build`, `--help`, `--version`)
+2. **Commands/** — `BuildCommand` orchestrates the full pipeline; `BuildCommandSettings` holds parsed CLI args
+3. **Services/** — `BuildRunner` executes `dotnet build -bl`; `LogAnalyzer` stream-parses the `.binlog` using `BinLogReader.ReadRecords()` (memory-efficient, does not load the full build tree)
+4. **Models/** — Immutable record types (`BuildReport`, `ProjectTiming`, `TargetTiming`) with required/init properties
+5. **Rendering/** — `ConsoleReportRenderer` displays results via plain `Console.WriteLine` with formatted tables
+6. **Export/** — `HtmlReportExporter` and `JsonReportExporter` generate output files
 
 ## Key Conventions
 
 - Classes are **sealed** unless inheritance is needed
 - Data models use **records** with `required` and `init` properties
 - Exporters and renderers are **static classes** with static methods
-- User-provided strings rendered via Spectre must use `Markup.Escape()` to prevent markup injection
 - Binary log parsing uses **streaming** (`BinLogReader.ReadRecords()`) — avoid loading the full structured build tree for performance
 - Deduplication: projects tracked by full path, targets by (name, project) pair
+- No reflection at runtime — AOT-safe throughout
 
 ## Dependencies
 
 - **MSBuild.StructuredLogger**: Binary log parsing
-- **Spectre.Console / Spectre.Console.Cli**: CLI framework and rich console output
 - **TUnit**: Unit testing framework (tests only)

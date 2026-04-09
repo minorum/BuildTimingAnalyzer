@@ -19,14 +19,12 @@
     <MetadataUpdaterSupport>false</MetadataUpdaterSupport>
     <HttpActivityPropagationSupport>false</HttpActivityPropagationSupport>
 
-    <Version>0.0.2</Version>
+    <Version>0.0.3</Version>
     <Description>CLI tool that analyzes MSBuild binary logs to identify build performance bottlenecks</Description>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="MSBuild.StructuredLogger" />
-    <PackageReference Include="Spectre.Console" />
-    <PackageReference Include="Spectre.Console.Cli" />
   </ItemGroup>
 
   <Target Name="GenerateVersionInfo" BeforeTargets="CoreCompile">

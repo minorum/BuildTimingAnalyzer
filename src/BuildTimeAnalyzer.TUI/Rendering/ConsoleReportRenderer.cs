@@ -1,5 +1,4 @@
 using BuildTimeAnalyzer.Models;
-using Spectre.Console;
 
 namespace BuildTimeAnalyzer.Rendering;
 
@@ -7,44 +6,34 @@ public static class ConsoleReportRenderer
 {
     public static void Render(BuildReport report, int topN)
     {
-        RenderSummaryPanel(report);
-        AnsiConsole.WriteLine();
+        RenderSummary(report);
+        Console.WriteLine();
         RenderProjectsTable(report, topN);
-        AnsiConsole.WriteLine();
+        Console.WriteLine();
         RenderTargetsTable(report);
+    }
+
+    public static void WriteHeader(string title)
+    {
+        var line = new string('-', Math.Max(0, 80 - title.Length - 3));
+        Console.WriteLine($"-- {title} {line}");
+        Console.WriteLine();
     }
 
     // ──────────────────────────── Summary ────────────────────────────
 
-    private static void RenderSummaryPanel(BuildReport report)
+    private static void RenderSummary(BuildReport report)
     {
-        var statusMarkup = report.Succeeded
-            ? "[bold green]✓ Build Succeeded[/]"
-            : "[bold red]✗ Build Failed[/]";
+        var status = report.Succeeded ? "Build Succeeded" : "Build Failed";
+        var project = Path.GetFileName(report.ProjectOrSolutionPath);
 
-        var grid = new Grid().AddColumns(2);
-
-        void Row(string label, Markup value)
-            => grid.AddRow(new Markup($"[grey]{label}[/]"), value);
-
-        Row("Status", new Markup(statusMarkup));
-        Row("Project", new Markup(Markup.Escape(Path.GetFileName(report.ProjectOrSolutionPath))));
-        Row("Started", new Markup(report.StartTime.ToString("HH:mm:ss")));
-        Row("Duration", new Markup($"[bold]{FormatDuration(report.TotalDuration)}[/]"));
-        Row("Errors", new Markup(report.ErrorCount > 0 ? $"[red]{report.ErrorCount}[/]" : "0"));
-        Row("Warnings", new Markup(report.WarningCount > 0 ? $"[yellow]{report.WarningCount}[/]" : "0"));
-        Row("Projects", new Markup(report.Projects.Count.ToString()));
-
-        var borderColor = report.Succeeded ? Color.Green : Color.Red;
-        var panel = new Panel(grid)
-        {
-            Header = new PanelHeader(" [bold]Build Report[/] "),
-            Border = BoxBorder.Rounded,
-            BorderStyle = new Style(borderColor),
-            Padding = new Padding(1, 0),
-        };
-
-        AnsiConsole.Write(panel);
+        Console.WriteLine($"  Status     {status}");
+        Console.WriteLine($"  Project    {project}");
+        Console.WriteLine($"  Started    {report.StartTime:HH:mm:ss}");
+        Console.WriteLine($"  Duration   {FormatDuration(report.TotalDuration)}");
+        Console.WriteLine($"  Errors     {report.ErrorCount}");
+        Console.WriteLine($"  Warnings   {report.WarningCount}");
+        Console.WriteLine($"  Projects   {report.Projects.Count}");
     }
 
     // ──────────────────────────── Projects ───────────────────────────
@@ -54,42 +43,28 @@ public static class ConsoleReportRenderer
         var projects = report.Projects.Take(topN).ToList();
         if (projects.Count == 0) return;
 
-        var table = new Table()
-            .Title("[bold blue]⏱ Top Projects by Duration[/]")
-            .BorderColor(Color.Grey)
-            .Border(TableBorder.Rounded)
-            .AddColumn(new TableColumn("[grey]#[/]").RightAligned())
-            .AddColumn(new TableColumn("[bold]Project[/]"))
-            .AddColumn(new TableColumn("[bold]Duration[/]").RightAligned())
-            .AddColumn(new TableColumn("[bold]% of Build[/]").RightAligned())
-            .AddColumn(new TableColumn("[bold]Share[/]"))
-            .AddColumn(new TableColumn("[bold]Errors[/]").RightAligned())
-            .AddColumn(new TableColumn("[bold]Warnings[/]").RightAligned());
+        Console.WriteLine("  Top Projects by Duration");
+        Console.WriteLine();
+
+        // Calculate column widths
+        var nameWidth = Math.Max(7, projects.Max(p => p.Name.Length));
+        nameWidth = Math.Min(nameWidth, 30);
+
+        Console.WriteLine($"  {"#",-4} {"Project".PadRight(nameWidth)}  {"Duration",10}  {"% Build",8}  {"Share",-20}  {"Err",4}  {"Warn",4}");
+        Console.WriteLine($"  {new string('-', 4)} {new string('-', nameWidth)}  {new string('-', 10)}  {new string('-', 8)}  {new string('-', 20)}  {new string('-', 4)}  {new string('-', 4)}");
 
         int rank = 1;
         foreach (var p in projects)
         {
             var barWidth = 20;
             var filled = (int)Math.Round(p.Percentage / 100.0 * barWidth);
-            var bar = new string('█', filled) + new string('░', barWidth - filled);
-            var barColor = p.Percentage > 50 ? "red" : p.Percentage > 20 ? "yellow" : "green";
+            var bar = new string('#', filled) + new string('.', barWidth - filled);
+            var name = p.Name.Length > nameWidth ? p.Name[..nameWidth] : p.Name;
+            var status = p.Succeeded ? " " : "!";
 
-            var statusIcon = p.Succeeded ? "" : "[red]✗[/] ";
-            var errCol = p.ErrorCount > 0 ? $"[red]{p.ErrorCount}[/]" : "[grey]0[/]";
-            var warnCol = p.WarningCount > 0 ? $"[yellow]{p.WarningCount}[/]" : "[grey]0[/]";
-
-            table.AddRow(
-                new Markup($"[grey]{rank++}[/]"),
-                new Markup($"{statusIcon}[white]{Markup.Escape(p.Name)}[/]"),
-                new Markup($"[bold]{FormatDuration(p.Duration)}[/]"),
-                new Markup($"{p.Percentage:F1}%"),
-                new Markup($"[{barColor}]{bar}[/]"),
-                new Markup(errCol),
-                new Markup(warnCol)
-            );
+            Console.WriteLine($"  {rank,-4} {status}{name.PadRight(nameWidth - 1)}  {FormatDuration(p.Duration),10}  {p.Percentage,7:F1}%  {bar,-20}  {p.ErrorCount,4}  {p.WarningCount,4}");
+            rank++;
         }
-
-        AnsiConsole.Write(table);
     }
 
     // ──────────────────────────── Targets ────────────────────────────
@@ -98,36 +73,29 @@ public static class ConsoleReportRenderer
     {
         if (report.TopTargets.Count == 0) return;
 
-        var table = new Table()
-            .Title("[bold blue]🎯 Slowest Targets[/]")
-            .BorderColor(Color.Grey)
-            .Border(TableBorder.Rounded)
-            .AddColumn(new TableColumn("[grey]#[/]").RightAligned())
-            .AddColumn(new TableColumn("[bold]Target[/]"))
-            .AddColumn(new TableColumn("[bold]Project[/]"))
-            .AddColumn(new TableColumn("[bold]Duration[/]").RightAligned())
-            .AddColumn(new TableColumn("[bold]% of Build[/]").RightAligned())
-            .AddColumn(new TableColumn("[bold]Share[/]"));
+        Console.WriteLine("  Slowest Targets");
+        Console.WriteLine();
+
+        var nameWidth = Math.Max(6, report.TopTargets.Max(t => t.Name.Length));
+        nameWidth = Math.Min(nameWidth, 30);
+        var projWidth = Math.Max(7, report.TopTargets.Max(t => t.ProjectName.Length));
+        projWidth = Math.Min(projWidth, 25);
+
+        Console.WriteLine($"  {"#",-4} {"Target".PadRight(nameWidth)}  {"Project".PadRight(projWidth)}  {"Duration",10}  {"% Build",8}  {"Share",-20}");
+        Console.WriteLine($"  {new string('-', 4)} {new string('-', nameWidth)}  {new string('-', projWidth)}  {new string('-', 10)}  {new string('-', 8)}  {new string('-', 20)}");
 
         int rank = 1;
         foreach (var t in report.TopTargets)
         {
             var barWidth = 20;
             var filled = (int)Math.Round(t.Percentage / 100.0 * barWidth);
-            var bar = new string('█', filled) + new string('░', barWidth - filled);
-            var barColor = t.Percentage > 30 ? "red" : t.Percentage > 10 ? "yellow" : "green";
+            var bar = new string('#', filled) + new string('.', barWidth - filled);
+            var name = t.Name.Length > nameWidth ? t.Name[..nameWidth] : t.Name;
+            var proj = t.ProjectName.Length > projWidth ? t.ProjectName[..projWidth] : t.ProjectName;
 
-            table.AddRow(
-                new Markup($"[grey]{rank++}[/]"),
-                new Markup($"[cyan]{Markup.Escape(t.Name)}[/]"),
-                new Markup($"[grey]{Markup.Escape(t.ProjectName)}[/]"),
-                new Markup($"[bold]{FormatDuration(t.Duration)}[/]"),
-                new Markup($"{t.Percentage:F1}%"),
-                new Markup($"[{barColor}]{bar}[/]")
-            );
+            Console.WriteLine($"  {rank,-4} {name.PadRight(nameWidth)}  {proj.PadRight(projWidth)}  {FormatDuration(t.Duration),10}  {t.Percentage,7:F1}%  {bar,-20}");
+            rank++;
         }
-
-        AnsiConsole.Write(table);
     }
 
     // ──────────────────────────── Analysis ───────────────────────────
@@ -136,35 +104,34 @@ public static class ConsoleReportRenderer
     {
         if (analysis.Findings.Count == 0) return;
 
-        AnsiConsole.WriteLine();
-        AnsiConsole.Write(new Rule("[bold blue]Analysis[/]").RuleStyle("blue").LeftJustified());
-        AnsiConsole.WriteLine();
+        Console.WriteLine();
+        WriteHeader("Analysis");
 
-        AnsiConsole.MarkupLine("[bold]Key Findings[/]");
-        AnsiConsole.WriteLine();
+        Console.WriteLine("  Key Findings");
+        Console.WriteLine();
 
         foreach (var f in analysis.Findings)
         {
-            var color = f.Severity switch
+            var severity = f.Severity switch
             {
-                FindingSeverity.Critical => "red",
-                FindingSeverity.Warning => "yellow",
-                _ => "blue",
+                FindingSeverity.Critical => "CRITICAL",
+                FindingSeverity.Warning => "WARNING",
+                _ => "INFO",
             };
-            AnsiConsole.MarkupLine($"  [{color}]{f.Number}.[/] [bold]{Markup.Escape(f.Title)}[/]");
-            AnsiConsole.MarkupLine($"     [grey]{Markup.Escape(f.Detail)}[/]");
-            AnsiConsole.WriteLine();
+            Console.WriteLine($"  {f.Number}. [{severity}] {f.Title}");
+            Console.WriteLine($"     {f.Detail}");
+            Console.WriteLine();
         }
 
         if (analysis.Recommendations.Count > 0)
         {
-            AnsiConsole.MarkupLine("[bold]Recommendations[/]");
-            AnsiConsole.WriteLine();
+            Console.WriteLine("  Recommendations");
+            Console.WriteLine();
             foreach (var r in analysis.Recommendations)
             {
-                AnsiConsole.MarkupLine($"  [green]{r.Number}.[/] {Markup.Escape(r.Text)}");
+                Console.WriteLine($"  {r.Number}. {r.Text}");
             }
-            AnsiConsole.WriteLine();
+            Console.WriteLine();
         }
     }
 

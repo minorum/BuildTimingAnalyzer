@@ -1,89 +1,51 @@
-using System.ComponentModel;
 using BuildTimeAnalyzer.Export;
 using BuildTimeAnalyzer.Models;
 using BuildTimeAnalyzer.Rendering;
 using BuildTimeAnalyzer.Services;
-using Spectre.Console;
-using Spectre.Console.Cli;
 
 namespace BuildTimeAnalyzer.Commands;
 
-public sealed class BuildCommandSettings : CommandSettings
+public static class BuildCommand
 {
-    [CommandArgument(0, "[project]")]
-    [Description("Path to the project or solution to build. Defaults to current directory.")]
-    public string? ProjectPath { get; init; }
-
-    [CommandOption("-c|--configuration")]
-    [DefaultValue("Debug")]
-    [Description("Build configuration (Debug/Release).")]
-    public string Configuration { get; init; } = "Debug";
-
-    [CommandOption("-n|--top")]
-    [DefaultValue(20)]
-    [Description("Number of top results to display.")]
-    public int TopN { get; init; } = 20;
-
-    [CommandOption("--keep-log")]
-    [Description("Keep the .binlog file after analysis.")]
-    public bool KeepLog { get; init; }
-
-    [CommandOption("-o|--output")]
-    [Description("Export report to file. Supported formats: .html, .json. Example: report.html")]
-    public string? OutputPath { get; init; }
-
-    [CommandOption("--args")]
-    [Description("Additional arguments passed verbatim to dotnet build.")]
-    public string? ExtraArgs { get; init; }
-}
-
-public sealed class BuildCommand : AsyncCommand<BuildCommandSettings>
-{
-    protected override async Task<int> ExecuteAsync(CommandContext context, BuildCommandSettings settings, CancellationToken cancellationToken)
+    public static async Task<int> RunAsync(string[] args)
     {
+        var settings = ParseArgs(args);
+        if (settings is null) return 1;
+
         var projectPath = settings.ProjectPath is { Length: > 0 }
             ? Path.GetFullPath(settings.ProjectPath)
             : Directory.GetCurrentDirectory();
 
-        AnsiConsole.Write(new Rule("[bold blue]MSBuild Timing Analyzer[/]").RuleStyle("blue").LeftJustified());
-        AnsiConsole.WriteLine();
+        ConsoleReportRenderer.WriteHeader("MSBuild Timing Analyzer");
 
-        // ── 1. Run dotnet build ───────────────────────────────────────
+        // 1. Run dotnet build
         var runner = new BuildRunner();
         var extra = settings.ExtraArgs?.Split(' ', StringSplitOptions.RemoveEmptyEntries)
                     ?? Array.Empty<string>();
 
-        var (exitCode, binLogPath) = await runner.RunAsync(projectPath, settings.Configuration, extra, cancellationToken);
+        var (exitCode, binLogPath) = await runner.RunAsync(projectPath, settings.Configuration, extra, CancellationToken.None);
 
-        // ── 2. Analyze the binary log (streaming) ─────────────────────
-        BuildReport? report = null;
-
-        await AnsiConsole.Status()
-            .Spinner(Spinner.Known.Dots)
-            .SpinnerStyle(Style.Parse("blue bold"))
-            .StartAsync("[blue]Analyzing binary log…[/]", async ctx =>
-            {
-                var analyzer = new LogAnalyzer(settings.TopN);
-                report = await analyzer.AnalyzeAsync(binLogPath, projectPath, cancellationToken);
-            });
+        // 2. Analyze the binary log
+        Console.WriteLine("Analyzing binary log...");
+        var analyzer = new LogAnalyzer(settings.TopN);
+        var report = await analyzer.AnalyzeAsync(binLogPath, projectPath);
 
         if (report is not { } finalReport)
         {
-            AnsiConsole.MarkupLine("[red]Failed to produce a report.[/]");
+            Console.Error.WriteLine("Failed to produce a report.");
             return exitCode;
         }
 
-        // ── 3. Render to console ──────────────────────────────────────
-        AnsiConsole.WriteLine();
-        AnsiConsole.Write(new Rule("[bold blue]MSBuild Timing Analyzer[/]").RuleStyle("blue").LeftJustified());
-        AnsiConsole.WriteLine();
+        // 3. Render to console
+        Console.WriteLine();
+        ConsoleReportRenderer.WriteHeader("MSBuild Timing Analyzer");
         ConsoleReportRenderer.Render(finalReport, settings.TopN);
 
-        // ── 3b. Automated analysis ─────────────────────────────────
+        // 3b. Automated analysis
         var analysis = BuildAnalyzer.Analyze(finalReport);
         ConsoleReportRenderer.RenderAnalysis(analysis);
 
-        // ── 4. Optional export ────────────────────────────────────────
+        // 4. Optional export
         if (settings.OutputPath is { Length: > 0 })
         {
             var ext = Path.GetExtension(settings.OutputPath).ToLowerInvariant();
@@ -91,24 +53,23 @@ public sealed class BuildCommand : AsyncCommand<BuildCommandSettings>
             {
                 case ".html":
                     HtmlReportExporter.Export(finalReport, settings.OutputPath, settings.TopN, analysis);
-                    AnsiConsole.MarkupLine($"\n[green]✓[/] HTML report saved to [bold]{Markup.Escape(Path.GetFullPath(settings.OutputPath))}[/]");
+                    Console.WriteLine($"HTML report saved to {Path.GetFullPath(settings.OutputPath)}");
                     break;
 
                 case ".json":
                     JsonReportExporter.Export(finalReport, settings.OutputPath, analysis);
-                    AnsiConsole.MarkupLine($"\n[green]✓[/] JSON report saved to [bold]{Markup.Escape(Path.GetFullPath(settings.OutputPath))}[/]");
+                    Console.WriteLine($"JSON report saved to {Path.GetFullPath(settings.OutputPath)}");
                     break;
 
                 default:
-                    AnsiConsole.MarkupLine($"[yellow]⚠ Unknown export format '{Markup.Escape(ext)}'. Supported: .html, .json[/]");
+                    Console.Error.WriteLine($"Unknown export format '{ext}'. Supported: .html, .json");
                     break;
             }
         }
 
-        // ── 5. Cleanup ────────────────────────────────────────────────
+        // 5. Cleanup
         if (!settings.KeepLog && File.Exists(binLogPath))
         {
-            // BinLogReader may hold the file briefly after enumeration; retry a few times.
             for (int attempt = 0; attempt < 5; attempt++)
             {
                 try
@@ -120,15 +81,93 @@ public sealed class BuildCommand : AsyncCommand<BuildCommandSettings>
                 {
                     GC.Collect();
                     GC.WaitForPendingFinalizers();
-                    await Task.Delay(200, cancellationToken);
+                    await Task.Delay(200);
                 }
             }
         }
         else if (settings.KeepLog)
         {
-            AnsiConsole.MarkupLine($"\n[grey]Binary log kept at: {Markup.Escape(binLogPath)}[/]");
+            Console.WriteLine($"Binary log kept at: {binLogPath}");
         }
 
         return exitCode;
     }
+
+    private static BuildCommandSettings? ParseArgs(string[] args)
+    {
+        var settings = new BuildCommandSettings();
+
+        for (int i = 0; i < args.Length; i++)
+        {
+            switch (args[i])
+            {
+                case "-h" or "--help":
+                    PrintHelp();
+                    return null;
+
+                case "-c" or "--configuration":
+                    if (++i >= args.Length) { Console.Error.WriteLine("Missing value for --configuration"); return null; }
+                    settings.Configuration = args[i];
+                    break;
+
+                case "-n" or "--top":
+                    if (++i >= args.Length) { Console.Error.WriteLine("Missing value for --top"); return null; }
+                    if (!int.TryParse(args[i], out var n)) { Console.Error.WriteLine($"Invalid number: {args[i]}"); return null; }
+                    settings.TopN = n;
+                    break;
+
+                case "-o" or "--output":
+                    if (++i >= args.Length) { Console.Error.WriteLine("Missing value for --output"); return null; }
+                    settings.OutputPath = args[i];
+                    break;
+
+                case "--keep-log":
+                    settings.KeepLog = true;
+                    break;
+
+                case "--args":
+                    if (++i >= args.Length) { Console.Error.WriteLine("Missing value for --args"); return null; }
+                    settings.ExtraArgs = args[i];
+                    break;
+
+                default:
+                    if (args[i].StartsWith('-'))
+                    {
+                        Console.Error.WriteLine($"Unknown option: {args[i]}");
+                        return null;
+                    }
+                    settings.ProjectPath = args[i];
+                    break;
+            }
+        }
+
+        return settings;
+    }
+
+    private static void PrintHelp()
+    {
+        Console.WriteLine("USAGE:");
+        Console.WriteLine("    btanalyzer build [project] [OPTIONS]");
+        Console.WriteLine();
+        Console.WriteLine("ARGUMENTS:");
+        Console.WriteLine("    [project]    Path to project or solution (default: current directory)");
+        Console.WriteLine();
+        Console.WriteLine("OPTIONS:");
+        Console.WriteLine("    -c, --configuration <CONFIG>    Build configuration (default: Debug)");
+        Console.WriteLine("    -n, --top <N>                   Number of top results (default: 20)");
+        Console.WriteLine("    -o, --output <PATH>             Export report (.html or .json)");
+        Console.WriteLine("    --keep-log                      Keep the .binlog file after analysis");
+        Console.WriteLine("    --args <ARGS>                   Additional arguments for dotnet build");
+        Console.WriteLine("    -h, --help                      Print help");
+    }
+}
+
+internal sealed class BuildCommandSettings
+{
+    public string? ProjectPath { get; set; }
+    public string Configuration { get; set; } = "Debug";
+    public int TopN { get; set; } = 20;
+    public bool KeepLog { get; set; }
+    public string? OutputPath { get; set; }
+    public string? ExtraArgs { get; set; }
 }

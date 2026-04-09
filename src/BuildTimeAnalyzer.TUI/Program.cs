@@ -1,19 +1,43 @@
 using BuildTimeAnalyzer.Commands;
-using Spectre.Console.Cli;
 
-#pragma warning disable IL3050 // Spectre.Console.Cli uses reflection but works correctly under AOT
-var app = new CommandApp();
-#pragma warning restore IL3050
-
-app.Configure(config =>
+if (args is ["-h" or "--help"] or [])
 {
-    config.SetApplicationName("btanalyzer");
-    config.SetApplicationVersion(BuildTimeAnalyzer.VersionInfo.Version);
-    config.AddCommand<BuildCommand>("build")
-        .WithDescription("Build and analyze a project or solution.")
-        .WithExample("build")
-        .WithExample("build", ".", "-c", "Release", "-n", "10")
-        .WithExample("build", "MyApp.sln", "-o", "report.html");
-});
+    PrintHelp();
+    return 0;
+}
 
-return await app.RunAsync(args);
+if (args is ["-v" or "--version"])
+{
+    Console.WriteLine(BuildTimeAnalyzer.VersionInfo.Version);
+    return 0;
+}
+
+if (args is not ["build", ..])
+{
+    Console.Error.WriteLine($"Unknown command: {args[0]}");
+    Console.Error.WriteLine("Run 'btanalyzer --help' for usage.");
+    return 1;
+}
+
+return await BuildCommand.RunAsync(args[1..]);
+
+static void PrintHelp()
+{
+    Console.WriteLine($"btanalyzer {BuildTimeAnalyzer.VersionInfo.Version}");
+    Console.WriteLine("CLI tool that analyzes MSBuild binary logs to identify build performance bottlenecks.");
+    Console.WriteLine();
+    Console.WriteLine("USAGE:");
+    Console.WriteLine("    btanalyzer <COMMAND> [OPTIONS]");
+    Console.WriteLine();
+    Console.WriteLine("COMMANDS:");
+    Console.WriteLine("    build    Build and analyze a project or solution");
+    Console.WriteLine();
+    Console.WriteLine("OPTIONS:");
+    Console.WriteLine("    -h, --help       Print help");
+    Console.WriteLine("    -v, --version    Print version");
+    Console.WriteLine();
+    Console.WriteLine("EXAMPLES:");
+    Console.WriteLine("    btanalyzer build");
+    Console.WriteLine("    btanalyzer build . -c Release -n 10");
+    Console.WriteLine("    btanalyzer build MyApp.sln -o report.html");
+}
