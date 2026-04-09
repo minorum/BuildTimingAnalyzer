@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.6
+
+- Fix timeline to show actual target execution spans instead of project instance lifetimes
+
 ## 0.0.5
 
 - Add build timeline showing wall-clock project spans in console and HTML reports
