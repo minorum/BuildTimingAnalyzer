@@ -5,6 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>BuildTimeAnalyzer</RootNamespace>
+    <AssemblyName>btanalyzer</AssemblyName>
     <PublishAot>true</PublishAot>
     <OptimizationPreference>Size</OptimizationPreference>
     <StackTraceSupport>false</StackTraceSupport>
@@ -18,6 +19,7 @@
     <MetadataUpdaterSupport>false</MetadataUpdaterSupport>
     <HttpActivityPropagationSupport>false</HttpActivityPropagationSupport>
 
+    <Version>0.0.2</Version>
     <Description>CLI tool that analyzes MSBuild binary logs to identify build performance bottlenecks</Description>
   </PropertyGroup>
 
@@ -26,4 +28,20 @@
     <PackageReference Include="Spectre.Console" />
     <PackageReference Include="Spectre.Console.Cli" />
   </ItemGroup>
+
+  <Target Name="GenerateVersionInfo" BeforeTargets="CoreCompile">
+    <PropertyGroup>
+      <_VersionInfoContent>
+namespace BuildTimeAnalyzer%3B
+internal static class VersionInfo
+{
+    public const string Version = "$(Version)"%3B
+}
+      </_VersionInfoContent>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(IntermediateOutputPath)VersionInfo.g.cs" Lines="$(_VersionInfoContent)" Overwrite="true" />
+    <ItemGroup>
+      <Compile Include="$(IntermediateOutputPath)VersionInfo.g.cs" />
+    </ItemGroup>
+  </Target>
 </Project>

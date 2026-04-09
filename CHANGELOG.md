@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.0.2
+
+- Rename executable from `BuildTimeAnalyzer.TUI` to `btanalyzer`
+- Show help/usage when run without arguments instead of throwing
+- Read version from build-time constant instead of hardcoded string
+- Strip PDB files from release builds
+
 ## 0.0.1
 
 Initial release.
