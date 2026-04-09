@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.5
+
+- Add build timeline showing wall-clock project spans in console and HTML reports
+- Visualize parallelism and sequencing at a glance
+
 ## 0.0.4
 
 - Fix AOT crash when analyzing binlogs — preserve MSBuild.Framework types from trimming

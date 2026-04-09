@@ -19,7 +19,7 @@
     <MetadataUpdaterSupport>false</MetadataUpdaterSupport>
     <HttpActivityPropagationSupport>false</HttpActivityPropagationSupport>
 
-    <Version>0.0.4</Version>
+    <Version>0.0.5</Version>
     <Description>CLI tool that analyzes MSBuild binary logs to identify build performance bottlenecks</Description>
   </PropertyGroup>
 
