@@ -207,14 +207,11 @@ public sealed class LogAnalyzer
                     Succeeded = g.All(x => x.Acc.Succeeded),
                     ErrorCount = g.Sum(x => x.Acc.ErrorCount),
                     WarningCount = g.Sum(x => x.Acc.WarningCount),
+                    Percentage = totalMs > 0 ? best.ExclusiveTime.TotalMilliseconds / totalMs * 100 : 0,
                 };
             })
             .OrderByDescending(p => p.Duration)
             .ToList();
-
-        // Assign percentages (relative to total wall-clock build time)
-        foreach (var p in projectList)
-            p.Percentage = totalMs > 0 ? p.Duration.TotalMilliseconds / totalMs * 100 : 0;
 
         // ── Build target list ──────────────────────────────────────────
         // Use exclusive duration; filter out near-zero orchestration targets.
@@ -229,14 +226,12 @@ public sealed class LogAnalyzer
                     Name = best.Name,
                     ProjectName = best.ProjectName,
                     Duration = best.ExclusiveDuration,
+                    Percentage = totalMs > 0 ? best.ExclusiveDuration.TotalMilliseconds / totalMs * 100 : 0,
                 };
             })
             .OrderByDescending(t => t.Duration)
             .Take(_topTargets)
             .ToList();
-
-        foreach (var t in topTargetList)
-            t.Percentage = totalMs > 0 ? t.Duration.TotalMilliseconds / totalMs * 100 : 0;
 
         return new BuildReport
         {

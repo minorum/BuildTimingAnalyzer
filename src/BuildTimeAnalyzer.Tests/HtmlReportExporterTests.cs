@@ -16,8 +16,8 @@ public sealed class HtmlReportExporterTests
             Succeeded = succeeded,
             ErrorCount = succeeded ? 0 : 2,
             WarningCount = 3,
+            Percentage = 62.5,
         };
-        project.Percentage = 62.5;
 
         return new BuildReport
         {
@@ -123,8 +123,8 @@ public sealed class HtmlReportExporterTests
             Succeeded = true,
             ErrorCount = 0,
             WarningCount = 0,
+            Percentage = 100,
         };
-        project.Percentage = 100;
 
         var report = new BuildReport
         {

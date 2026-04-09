@@ -39,7 +39,7 @@ public sealed class BuildCommandSettings : CommandSettings
 
 public sealed class BuildCommand : AsyncCommand<BuildCommandSettings>
 {
-    public override async Task<int> ExecuteAsync(CommandContext context, BuildCommandSettings settings, CancellationToken cancellationToken)
+    protected override async Task<int> ExecuteAsync(CommandContext context, BuildCommandSettings settings, CancellationToken cancellationToken)
     {
         var projectPath = settings.ProjectPath is { Length: > 0 }
             ? Path.GetFullPath(settings.ProjectPath)

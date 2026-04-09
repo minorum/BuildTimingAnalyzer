@@ -26,9 +26,8 @@ public sealed class BuildAnalyzerTests
         };
     }
 
-    private static ProjectTiming CreateProject(string name, double seconds, double percentage, int warningCount = 0)
-    {
-        var p = new ProjectTiming
+    private static ProjectTiming CreateProject(string name, double seconds, double percentage, int warningCount = 0) =>
+        new()
         {
             Name = name,
             FullPath = $"C:\\src\\{name}\\{name}.csproj",
@@ -36,22 +35,17 @@ public sealed class BuildAnalyzerTests
             Succeeded = true,
             ErrorCount = 0,
             WarningCount = warningCount,
+            Percentage = percentage,
         };
-        p.Percentage = percentage;
-        return p;
-    }
 
-    private static TargetTiming CreateTarget(string name, string project, double seconds, double percentage)
-    {
-        var t = new TargetTiming
+    private static TargetTiming CreateTarget(string name, string project, double seconds, double percentage) =>
+        new()
         {
             Name = name,
             ProjectName = project,
             Duration = TimeSpan.FromSeconds(seconds),
+            Percentage = percentage,
         };
-        t.Percentage = percentage;
-        return t;
-    }
 
     [Test]
     public async Task ShortBuild_ReturnsEmpty()

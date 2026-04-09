@@ -21,7 +21,7 @@ public sealed record ProjectTiming
     public required bool Succeeded { get; init; }
     public required int ErrorCount { get; init; }
     public required int WarningCount { get; init; }
-    public double Percentage { get; set; }
+    public double Percentage { get; init; }
 }
 
 public sealed record TargetTiming
@@ -29,5 +29,5 @@ public sealed record TargetTiming
     public required string Name { get; init; }
     public required string ProjectName { get; init; }
     public required TimeSpan Duration { get; init; }
-    public double Percentage { get; set; }
+    public double Percentage { get; init; }
 }

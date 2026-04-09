@@ -1,5 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using BuildTimeAnalyzer.Models;
+using BuildTimeAnalyzer.Rendering;
 
 namespace BuildTimeAnalyzer.Export;
 

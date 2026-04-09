@@ -17,16 +17,16 @@ public sealed class JsonReportExporterTests
             Succeeded = true,
             ErrorCount = 0,
             WarningCount = 3,
+            Percentage = 62.5,
         };
-        project.Percentage = 62.5;
 
         var target = new TargetTiming
         {
             Name = "CoreCompile",
             ProjectName = "MyApp",
             Duration = TimeSpan.FromSeconds(8.2),
+            Percentage = 41.0,
         };
-        target.Percentage = 41.0;
 
         return new BuildReport
         {
