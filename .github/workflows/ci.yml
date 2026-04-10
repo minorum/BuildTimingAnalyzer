@@ -6,26 +6,55 @@ on:
   pull_request:
     branches: [master]
 
+# Cancel in-progress runs for the same branch/PR when a new commit is pushed
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Default to read-only: jobs get only what they explicitly need
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+  SOLUTION: BuildTimeAnalyzer.slnx
+  TUI_PROJECT: src/BuildTimeAnalyzer.TUI/BuildTimeAnalyzer.TUI.csproj
+
 jobs:
-  build:
+  build-and-test:
+    name: Build & test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
 
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/Directory.Packages.props', '**/*.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
       - name: Restore
-        run: dotnet restore
+        run: dotnet restore ${{ env.SOLUTION }}
 
       - name: Build
-        run: dotnet build --no-restore -c Release
+        run: dotnet build ${{ env.SOLUTION }} --configuration Release --no-restore
 
       - name: Test
-        run: dotnet test --no-build -c Release
+        run: dotnet test ${{ env.SOLUTION }} --configuration Release --no-build
