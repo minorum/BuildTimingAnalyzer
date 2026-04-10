@@ -45,14 +45,35 @@ public static class BuildCommand
             },
         };
 
-        // 3. Render to console
-        Console.WriteLine();
-        ConsoleReportRenderer.WriteHeader("MSBuild Timing Analyzer");
-        ConsoleReportRenderer.Render(finalReport, settings.TopN);
-
-        // 3b. Automated analysis
+        // 3. Run analysis first so the renderer can place findings near the top
         var analysis = BuildAnalyzer.Analyze(finalReport);
-        ConsoleReportRenderer.RenderAnalysis(analysis);
+
+        // 4. Render into a buffer, then display via pager (falls back to plain output when
+        //    stdout is redirected or the content fits on one screen).
+        Console.WriteLine();
+        var usePager = !settings.NoPager;
+        if (usePager)
+        {
+            var buffer = new StringWriter();
+            var previousOut = Console.Out;
+            Console.SetOut(buffer);
+            try
+            {
+                ConsoleReportRenderer.WriteHeader("MSBuild Timing Analyzer");
+                ConsoleReportRenderer.Render(finalReport, analysis, settings.TopN);
+            }
+            finally
+            {
+                Console.SetOut(previousOut);
+            }
+            var lines = buffer.ToString().TrimEnd('\r', '\n').Split('\n').Select(l => l.TrimEnd('\r')).ToList();
+            ConsolePager.Display(lines);
+        }
+        else
+        {
+            ConsoleReportRenderer.WriteHeader("MSBuild Timing Analyzer");
+            ConsoleReportRenderer.Render(finalReport, analysis, settings.TopN);
+        }
 
         // 4. Optional export
         if (settings.OutputPath is { Length: > 0 })
@@ -138,6 +159,10 @@ public static class BuildCommand
                     settings.Incremental = true;
                     break;
 
+                case "--no-pager":
+                    settings.NoPager = true;
+                    break;
+
                 case "--args":
                     if (++i >= args.Length) { Console.Error.WriteLine("Missing value for --args"); return null; }
                     settings.ExtraArgs = args[i];
@@ -170,6 +195,7 @@ public static class BuildCommand
         Console.WriteLine("    -n, --top <N>                   Number of top results (default: 20)");
         Console.WriteLine("    -o, --output <PATH>             Export report (.html or .json)");
         Console.WriteLine("    --incremental                   Allow incremental build (default: --no-incremental for reproducibility)");
+        Console.WriteLine("    --no-pager                      Disable the interactive pager, stream output directly");
         Console.WriteLine("    --keep-log                      Keep the .binlog file after analysis");
         Console.WriteLine("    --args <ARGS>                   Additional arguments for dotnet build");
         Console.WriteLine("    -h, --help                      Print help");
@@ -183,6 +209,7 @@ internal sealed class BuildCommandSettings
     public int TopN { get; set; } = 20;
     public bool KeepLog { get; set; }
     public bool Incremental { get; set; } = false;
+    public bool NoPager { get; set; } = false;
     public string? OutputPath { get; set; }
     public string? ExtraArgs { get; set; }
 }

@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.0.11
+
+Report information architecture overhaul. The default report is now answer-first, not
+dashboard-first: you see the summary, the headline, and the analysis before anything else.
+Supporting data follows in descending order of usefulness, and sections must earn their
+place by actually having something to say.
+
+### New default section order
+1. Summary
+2. **Headline** — 2–4 line factual synthesis with a pointer to the top finding
+3. **Analysis** — findings moved to the top, directly after the headline
+4. Build Context (demoted, more compact)
+5. Top Projects with inline composition + target drill-down
+6. Top Targets
+7. Self Time by Category
+8. Reference Overhead
+9. **Dependency Graph** — consolidated parent section containing Graph Health, Cycle
+   Status, Critical Path Validation, Dependency Hubs, and the Critical Path Estimate
+10. Build Timeline
+11. Span Outliers
+12. Project Count Tax
+13. Potentially Custom Targets
+
+### Severity-ordered findings
+- Findings are now sorted Critical → Warning → Info, then by detection order within a
+  severity. Numbering reflects the new order. The top finding is always the most
+  actionable one.
+
+### Signal-based section gating
+- Sections must earn their place, not just meet a project-count threshold:
+  - Dependency Graph: hidden unless graph has ≥ 2 projects AND ≥ 1 edge
+  - Timeline: hidden for 1–2 project solutions, or when all projects span the full wall clock
+  - Category Totals: hidden unless ≥ 3 categories are non-trivial
+  - Project Count Tax: shown either when the solution has ≥ 10 projects OR when any indicator is non-zero
+  - Potentially Custom Targets: hidden unless at least one item has self time ≥ 1s (unchanged)
+
+### Collapsed graph sections
+- Previous separate sections (Dependency Graph Health, Dependency Hubs, Cycle Check,
+  Critical Path Validation, Critical Path Estimate) were competing as top-level peers.
+  They are now subsections of a single **Dependency Graph** section with compact one-line
+  headers for health/cycles/validation and full subsections for hubs and the critical path.
+- Cycle status is a one-liner ("none detected" or "N detected, first: A → B → C → A"),
+  never a full section anymore.
+
+### Interactive console pager
+- New built-in pager modeled on `less`, with zero third-party dependencies
+- Uses ANSI alternate screen buffer so your scrollback stays intact on exit
+- Keys: Space / PgDn / f (down), b / PgUp (up), j/k or arrows (line), g/Home (top),
+  G/End (bottom), q / Esc (quit)
+- Status bar at the bottom shows position and key hints
+- Auto-disabled when stdout is redirected (piped to a file, CI, grep, etc.)
+- Auto-disabled when the report fits on screen without scrolling
+- New `--no-pager` flag to opt out explicitly
+
 ## 0.0.10
 
 Build reproducibility.

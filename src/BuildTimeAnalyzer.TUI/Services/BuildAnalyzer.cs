@@ -53,6 +53,21 @@ public static class BuildAnalyzer
         DetectSpanWaitingPattern(report, findings);
         DetectCriticalPathConcentration(report, totalSelfMs, findings);
 
+        // Severity order: Critical first, then Warning, then Info.
+        // Keep detection order within a severity so consecutive runs produce stable numbering.
+        var ordered = findings
+            .Select((f, idx) => (f, idx))
+            .OrderBy(x => x.f.Severity switch
+            {
+                FindingSeverity.Critical => 0,
+                FindingSeverity.Warning => 1,
+                _ => 2,
+            })
+            .ThenBy(x => x.idx)
+            .Select(x => x.f)
+            .ToList();
+        findings = ordered;
+
         for (int i = 0; i < findings.Count; i++)
             findings[i] = findings[i] with { Number = i + 1 };
 
