@@ -7,18 +7,24 @@ public sealed class BuildRunner
     public async Task<(int ExitCode, string BinLogPath)> RunAsync(
         string projectPath,
         string configuration,
+        bool incremental,
         IEnumerable<string> extraArgs,
         CancellationToken ct = default)
     {
         var binLogPath = Path.Combine(Path.GetTempPath(), $"build-{Guid.NewGuid():N}.binlog");
 
+        // Default is --no-incremental so measurements are reproducible.
+        // Incremental builds skip most targets when nothing changed, which makes the numbers depend
+        // on prior build state rather than on the actual cost of your build.
         var args = new List<string>
         {
             "build",
             projectPath,
             $"-c {configuration}",
             $"-bl:\"{binLogPath}\"",
+            "-nologo",
         };
+        if (!incremental) args.Add("--no-incremental");
         args.AddRange(extraArgs);
 
         var psi = new ProcessStartInfo("dotnet", string.Join(" ", args))

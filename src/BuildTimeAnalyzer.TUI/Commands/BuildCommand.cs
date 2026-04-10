@@ -23,7 +23,7 @@ public static class BuildCommand
         var extra = settings.ExtraArgs?.Split(' ', StringSplitOptions.RemoveEmptyEntries)
                     ?? Array.Empty<string>();
 
-        var (exitCode, binLogPath) = await runner.RunAsync(projectPath, settings.Configuration, extra, CancellationToken.None);
+        var (exitCode, binLogPath) = await runner.RunAsync(projectPath, settings.Configuration, settings.Incremental, extra, CancellationToken.None);
 
         // 2. Analyze the binary log
         Console.WriteLine("Analyzing binary log...");
@@ -35,6 +35,15 @@ public static class BuildCommand
             Console.Error.WriteLine("Failed to produce a report.");
             return exitCode;
         }
+
+        // Overlay the build mode — the runner knows how we invoked dotnet build, the analyzer doesn't
+        finalReport = finalReport with
+        {
+            Context = finalReport.Context with
+            {
+                BuildMode = settings.Incremental ? "incremental" : "full (--no-incremental)",
+            },
+        };
 
         // 3. Render to console
         Console.WriteLine();
@@ -125,6 +134,10 @@ public static class BuildCommand
                     settings.KeepLog = true;
                     break;
 
+                case "--incremental":
+                    settings.Incremental = true;
+                    break;
+
                 case "--args":
                     if (++i >= args.Length) { Console.Error.WriteLine("Missing value for --args"); return null; }
                     settings.ExtraArgs = args[i];
@@ -156,6 +169,7 @@ public static class BuildCommand
         Console.WriteLine("    -c, --configuration <CONFIG>    Build configuration (default: Debug)");
         Console.WriteLine("    -n, --top <N>                   Number of top results (default: 20)");
         Console.WriteLine("    -o, --output <PATH>             Export report (.html or .json)");
+        Console.WriteLine("    --incremental                   Allow incremental build (default: --no-incremental for reproducibility)");
         Console.WriteLine("    --keep-log                      Keep the .binlog file after analysis");
         Console.WriteLine("    --args <ARGS>                   Additional arguments for dotnet build");
         Console.WriteLine("    -h, --help                      Print help");
@@ -168,6 +182,7 @@ internal sealed class BuildCommandSettings
     public string Configuration { get; set; } = "Debug";
     public int TopN { get; set; } = 20;
     public bool KeepLog { get; set; }
+    public bool Incremental { get; set; } = false;
     public string? OutputPath { get; set; }
     public string? ExtraArgs { get; set; }
 }

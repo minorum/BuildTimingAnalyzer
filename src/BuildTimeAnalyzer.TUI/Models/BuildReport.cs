@@ -126,6 +126,12 @@ public sealed record BuildContext
     public string? OperatingSystem { get; init; }
     public int? Parallelism { get; init; }
     public bool? RestoreObserved { get; init; }
+    /// <summary>
+    /// How btanalyzer invoked the build. "full (--no-incremental)" for reproducible measurements,
+    /// "incremental" when the user opted in to measure the dev inner loop.
+    /// Null if the report was generated without BuildCommand (e.g. direct LogAnalyzer use).
+    /// </summary>
+    public string? BuildMode { get; init; }
 }
 
 public sealed record ReferenceOverheadStats

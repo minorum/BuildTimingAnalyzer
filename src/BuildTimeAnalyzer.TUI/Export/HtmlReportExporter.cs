@@ -560,6 +560,7 @@ public static class HtmlReportExporter
         var rows = new List<(string, string)>();
         var ctx = report.Context;
         if (ctx.Configuration is not null) rows.Add(("Configuration", ctx.Configuration));
+        if (ctx.BuildMode is not null) rows.Add(("Build Mode", ctx.BuildMode));
         if (ctx.SdkVersion is not null) rows.Add((".NET SDK", ctx.SdkVersion));
         if (ctx.MSBuildVersion is not null) rows.Add(("MSBuild", ctx.MSBuildVersion));
         if (ctx.OperatingSystem is not null) rows.Add(("OS", ctx.OperatingSystem));

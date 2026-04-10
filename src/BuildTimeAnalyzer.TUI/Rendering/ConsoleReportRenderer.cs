@@ -109,6 +109,7 @@ public static class ConsoleReportRenderer
         var ctx = report.Context;
         var lines = new List<(string Label, string Value)>();
         if (ctx.Configuration is not null) lines.Add(("Configuration", ctx.Configuration));
+        if (ctx.BuildMode is not null) lines.Add(("Build Mode", ctx.BuildMode));
         if (ctx.SdkVersion is not null) lines.Add((".NET SDK", ctx.SdkVersion));
         if (ctx.MSBuildVersion is not null) lines.Add(("MSBuild", ctx.MSBuildVersion));
         if (ctx.OperatingSystem is not null) lines.Add(("OS", ctx.OperatingSystem));

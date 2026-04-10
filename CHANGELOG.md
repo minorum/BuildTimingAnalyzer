@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.0.10
+
+Build reproducibility.
+
+- Default to `--no-incremental` when invoking `dotnet build`, so running btanalyzer twice
+  on the same workspace produces comparable numbers instead of mixing "expensive" with
+  "happened to be cached"
+- New `--incremental` flag opts back into the old behavior for measuring the dev inner loop
+- Build mode surfaced in the Build Context section (`full (--no-incremental)` or `incremental`)
+- Add `-nologo` to the dotnet build invocation to cut noise
+- Build Context fields are also exported in JSON (new `buildMode` field) and HTML report
+
+Note: even with `--no-incremental`, MSBuild still skips some internal targets whose inputs
+haven't changed (restore graph resolution, etc.). The `Incremental` line in Build Context
+still reports the actual executed/skipped ratio so the behavior is visible.
+
 ## 0.0.9
 
 Evidence/interpretation separation release. The report now keeps measured facts,

@@ -29,6 +29,7 @@ public static class JsonReportExporter
         Context = new JsonBuildContextDto
         {
             Configuration = report.Context.Configuration,
+            BuildMode = report.Context.BuildMode,
             SdkVersion = report.Context.SdkVersion,
             MSBuildVersion = report.Context.MSBuildVersion,
             OperatingSystem = report.Context.OperatingSystem,
@@ -226,6 +227,7 @@ internal sealed class JsonReportDto
 internal sealed class JsonBuildContextDto
 {
     public string? Configuration { get; init; }
+    public string? BuildMode { get; init; }
     public string? SdkVersion { get; init; }
     public string? MSBuildVersion { get; init; }
     public string? OperatingSystem { get; init; }
