@@ -1,6 +1,7 @@
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 using BuildTimeAnalyzer.Export;
 using BuildTimeAnalyzer.Models;
-using BuildTimeAnalyzer.Rendering;
 using BuildTimeAnalyzer.Services;
 
 namespace BuildTimeAnalyzer.Commands;
@@ -16,17 +17,22 @@ public static class BuildCommand
             ? Path.GetFullPath(settings.ProjectPath)
             : Directory.GetCurrentDirectory();
 
-        ConsoleReportRenderer.WriteHeader("MSBuild Timing Analyzer");
+        Console.WriteLine($"btanalyzer {BuildTimeAnalyzer.VersionInfo.Version}");
+        Console.WriteLine();
 
-        // 1. Run dotnet build
+        // ── 1. Run dotnet build with binary logging ─────────────────
+        Step("Running build with binary logging");
+        Console.WriteLine();
+
         var runner = new BuildRunner();
         var extra = settings.ExtraArgs?.Split(' ', StringSplitOptions.RemoveEmptyEntries)
                     ?? Array.Empty<string>();
 
-        var (exitCode, binLogPath) = await runner.RunAsync(projectPath, settings.Configuration, settings.Incremental, extra, CancellationToken.None);
+        var (exitCode, binLogPath) = await runner.RunAsync(
+            projectPath, settings.Configuration, settings.Incremental, extra, CancellationToken.None);
 
-        // 2. Analyze the binary log
-        Console.WriteLine("Analyzing binary log...");
+        // ── 2. Parse the binary log ────────────────────────────────
+        Step("Parsing binary log");
         var analyzer = new LogAnalyzer(settings.TopN);
         var report = await analyzer.AnalyzeAsync(binLogPath, projectPath);
 
@@ -36,7 +42,6 @@ public static class BuildCommand
             return exitCode;
         }
 
-        // Overlay the build mode — the runner knows how we invoked dotnet build, the analyzer doesn't
         finalReport = finalReport with
         {
             Context = finalReport.Context with
@@ -45,59 +50,46 @@ public static class BuildCommand
             },
         };
 
-        // 3. Run analysis first so the renderer can place findings near the top
+        // ── 3. Run automated analysis ──────────────────────────────
         var analysis = BuildAnalyzer.Analyze(finalReport);
+        var findingCount = analysis.Findings.Count;
+        var criticalCount = analysis.Findings.Count(f => f.Severity == FindingSeverity.Critical);
+        Step($"Analysing: {finalReport.Projects.Count} project(s), {finalReport.Graph.Health.TotalEdges} dependency edge(s), {findingCount} finding(s){(criticalCount > 0 ? $" ({criticalCount} critical)" : "")}");
 
-        // 4. Render into a buffer, then display via pager (falls back to plain output when
-        //    stdout is redirected or the content fits on one screen).
-        Console.WriteLine();
-        var usePager = !settings.NoPager;
-        if (usePager)
+        // ── 4. Decide output format and path ───────────────────────
+        var (outputPath, outputFormat) = ResolveOutputPath(settings);
+
+        Step($"Generating {outputFormat.ToUpperInvariant()} report");
+        switch (outputFormat)
         {
-            var buffer = new StringWriter();
-            var previousOut = Console.Out;
-            Console.SetOut(buffer);
-            try
-            {
-                ConsoleReportRenderer.WriteHeader("MSBuild Timing Analyzer");
-                ConsoleReportRenderer.Render(finalReport, analysis, settings.TopN);
-            }
-            finally
-            {
-                Console.SetOut(previousOut);
-            }
-            var lines = buffer.ToString().TrimEnd('\r', '\n').Split('\n').Select(l => l.TrimEnd('\r')).ToList();
-            ConsolePager.Display(lines);
-        }
-        else
-        {
-            ConsoleReportRenderer.WriteHeader("MSBuild Timing Analyzer");
-            ConsoleReportRenderer.Render(finalReport, analysis, settings.TopN);
+            case "html":
+                HtmlReportExporter.Export(finalReport, outputPath, settings.TopN, analysis);
+                break;
+            case "json":
+                JsonReportExporter.Export(finalReport, outputPath, analysis);
+                break;
         }
 
-        // 4. Optional export
-        if (settings.OutputPath is { Length: > 0 })
+        Step($"Saved to: {outputPath}");
+
+        // ── 5. Open in browser (HTML only, opt-out + environment-aware) ─
+        if (outputFormat == "html" && ShouldOpenBrowser(settings))
         {
-            var ext = Path.GetExtension(settings.OutputPath).ToLowerInvariant();
-            switch (ext)
+            Step("Opening in default browser");
+            if (!TryOpenInBrowser(outputPath))
             {
-                case ".html":
-                    HtmlReportExporter.Export(finalReport, settings.OutputPath, settings.TopN, analysis);
-                    Console.WriteLine($"HTML report saved to {Path.GetFullPath(settings.OutputPath)}");
-                    break;
-
-                case ".json":
-                    JsonReportExporter.Export(finalReport, settings.OutputPath, analysis);
-                    Console.WriteLine($"JSON report saved to {Path.GetFullPath(settings.OutputPath)}");
-                    break;
-
-                default:
-                    Console.Error.WriteLine($"Unknown export format '{ext}'. Supported: .html, .json");
-                    break;
+                Console.WriteLine("   (Could not launch browser automatically. Open the file above manually.)");
             }
         }
+        else if (outputFormat == "html")
+        {
+            Console.WriteLine("   (Browser launch skipped. Open the file manually or rerun without --no-open.)");
+        }
 
-        // 5. Cleanup
+        // ── 6. Summary line with top finding ────────────────────────
+        PrintSummaryLine(finalReport, analysis);
+
+        // ── 7. Cleanup binlog ──────────────────────────────────────
         if (!settings.KeepLog && File.Exists(binLogPath))
         {
             for (int attempt = 0; attempt < 5; attempt++)
@@ -117,11 +109,112 @@ public static class BuildCommand
         }
         else if (settings.KeepLog)
         {
+            Console.WriteLine();
             Console.WriteLine($"Binary log kept at: {binLogPath}");
         }
 
         return exitCode;
     }
+
+    private static void Step(string message) => Console.WriteLine($"==> {message}");
+
+    private static (string path, string format) ResolveOutputPath(BuildCommandSettings settings)
+    {
+        if (settings.OutputPath is { Length: > 0 })
+        {
+            var explicitPath = Path.GetFullPath(settings.OutputPath);
+            var ext = Path.GetExtension(explicitPath).ToLowerInvariant();
+            var format = ext switch
+            {
+                ".json" => "json",
+                ".html" or ".htm" => "html",
+                _ => "html",
+            };
+            return (explicitPath, format);
+        }
+
+        // Default: temp HTML file with timestamp. Predictable, easy to clean up manually.
+        var name = $"btanalyzer-{DateTime.Now:yyyyMMdd-HHmmss}.html";
+        return (Path.Combine(Path.GetTempPath(), name), "html");
+    }
+
+    private static bool ShouldOpenBrowser(BuildCommandSettings settings)
+    {
+        if (settings.NoOpen) return false;
+        if (Console.IsOutputRedirected) return false;
+        // Common CI environment variable set by GitHub Actions, GitLab CI, CircleCI, Azure DevOps, etc.
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CI"))) return false;
+        // Headless Linux (no X11)
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux) &&
+            string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DISPLAY")) &&
+            string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY")))
+        {
+            return false;
+        }
+        return true;
+    }
+
+    private static bool TryOpenInBrowser(string path)
+    {
+        try
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = path,
+                    UseShellExecute = true,
+                });
+                return true;
+            }
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            {
+                Process.Start("open", path);
+                return true;
+            }
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            {
+                Process.Start("xdg-open", path);
+                return true;
+            }
+        }
+        catch
+        {
+            return false;
+        }
+        return false;
+    }
+
+    private static void PrintSummaryLine(BuildReport report, BuildAnalysis analysis)
+    {
+        Console.WriteLine();
+        var status = report.Succeeded ? "OK" : "FAILED";
+        Console.Write($"Build {status} in {Fmt(report.TotalDuration)}");
+        if (report.WarningCount > 0) Console.Write($" | {report.WarningCount} warning(s)");
+        if (report.ErrorCount > 0) Console.Write($" | {report.ErrorCount} error(s)");
+        Console.WriteLine();
+
+        var topFinding = analysis.Findings
+            .OrderBy(f => f.Severity switch
+            {
+                FindingSeverity.Critical => 0,
+                FindingSeverity.Warning => 1,
+                _ => 2,
+            })
+            .FirstOrDefault();
+        if (topFinding is not null)
+        {
+            var label = topFinding.Severity switch
+            {
+                FindingSeverity.Critical => "CRITICAL",
+                FindingSeverity.Warning => "WARNING",
+                _ => "INFO",
+            };
+            Console.WriteLine($"Top finding [{label}]: {topFinding.Title}");
+        }
+    }
+
+    private static string Fmt(TimeSpan ts) => Rendering.ConsoleReportRenderer.FormatDuration(ts);
 
     private static BuildCommandSettings? ParseArgs(string[] args)
     {
@@ -159,8 +252,8 @@ public static class BuildCommand
                     settings.Incremental = true;
                     break;
 
-                case "--no-pager":
-                    settings.NoPager = true;
+                case "--no-open":
+                    settings.NoOpen = true;
                     break;
 
                 case "--args":
@@ -192,10 +285,10 @@ public static class BuildCommand
         Console.WriteLine();
         Console.WriteLine("OPTIONS:");
         Console.WriteLine("    -c, --configuration <CONFIG>    Build configuration (default: Debug)");
-        Console.WriteLine("    -n, --top <N>                   Number of top results (default: 20)");
-        Console.WriteLine("    -o, --output <PATH>             Export report (.html or .json)");
+        Console.WriteLine("    -n, --top <N>                   Number of top results in the report (default: 20)");
+        Console.WriteLine("    -o, --output <PATH>             Output file path (.html or .json). Default: temp HTML file");
+        Console.WriteLine("    --no-open                       Do not launch the default browser after generating the HTML report");
         Console.WriteLine("    --incremental                   Allow incremental build (default: --no-incremental for reproducibility)");
-        Console.WriteLine("    --no-pager                      Disable the interactive pager, stream output directly");
         Console.WriteLine("    --keep-log                      Keep the .binlog file after analysis");
         Console.WriteLine("    --args <ARGS>                   Additional arguments for dotnet build");
         Console.WriteLine("    -h, --help                      Print help");
@@ -209,7 +302,7 @@ internal sealed class BuildCommandSettings
     public int TopN { get; set; } = 20;
     public bool KeepLog { get; set; }
     public bool Incremental { get; set; } = false;
-    public bool NoPager { get; set; } = false;
+    public bool NoOpen { get; set; } = false;
     public string? OutputPath { get; set; }
     public string? ExtraArgs { get; set; }
 }

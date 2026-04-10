@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.0.13
+
+Switch to HTML-first output. The terminal renderer is gone. btanalyzer now prints short
+progress messages during processing, generates the HTML report, and opens it in the
+default browser.
+
+### Rationale
+- The HTML report is already the most comprehensive view. Keeping a separate terminal
+  rendering in sync was a constant source of churn, and the console output was never as
+  good as the HTML.
+- Terminal rendering required either raw ANSI sequences or managed Console APIs that
+  tripped corporate antivirus heuristics on unsigned AOT binaries (the v0.0.11 regression).
+- A browser gives you search, text selection, zoom, scrolling, and saving for free.
+
+### New flow
+```
+btanalyzer 0.0.13
+
+==> Running build with binary logging
+<dotnet build output streams live>
+
+==> Parsing binary log
+==> Analysing: 27 project(s), 84 dependency edge(s), 4 finding(s) (1 critical)
+==> Generating HTML report
+==> Saved to: /tmp/btanalyzer-20260410-164738.html
+==> Opening in default browser
+
+Build OK in 1m 23s | 683 warning(s)
+Top finding [CRITICAL]: Largest self-time share: OutputGenerator.Web.Umbraco
+```
+
+### Changes
+- Removed the in-process terminal report rendering (all `Render*` methods)
+- Removed `ConsolePager.cs` entirely (not needed anymore)
+- Removed `--no-pager` flag
+- Added `--no-open` flag to skip browser launch (for scripts, CI, headless environments)
+- Auto-skips browser launch when `CI` environment variable is set
+- Auto-skips browser launch on Linux when neither `DISPLAY` nor `WAYLAND_DISPLAY` is set
+- Auto-skips browser launch when stdout is redirected
+- Default output path is now a temp HTML file with a timestamp; `-o` still honored for
+  explicit paths in either HTML or JSON format
+- `ConsoleReportRenderer` is now just a utility class with `FormatDuration` /
+  `CategoryLabel` helpers shared by the HTML exporter, JSON exporter, and analyzer
+
+### Binary profile
+- No terminal control sequences
+- No `Console.ReadKey` (removed in v0.0.12, still gone)
+- Only uses `Process.Start` for launching dotnet build, the system pager (dropped here),
+  and now the default browser via `UseShellExecute = true` on Windows / `xdg-open` on
+  Linux / `open` on macOS
+- Matches the pre-v0.0.11 import profile — should not trip AV heuristics
+
 ## 0.0.12
 
 Fixes a regression introduced in v0.0.11: corporate antivirus engines started
