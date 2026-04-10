@@ -9,7 +9,9 @@ public sealed class BuildAnalyzerTests
         TimeSpan? totalDuration = null,
         List<ProjectTiming>? projects = null,
         List<TargetTiming>? targets = null,
-        int warningCount = 0)
+        int warningCount = 0,
+        List<ProjectTiming>? criticalPath = null,
+        TimeSpan? criticalPathTotal = null)
     {
         var duration = totalDuration ?? TimeSpan.FromSeconds(60);
         var start = new DateTime(2025, 1, 1, 12, 0, 0);
@@ -23,6 +25,13 @@ public sealed class BuildAnalyzerTests
             WarningCount = warningCount,
             Projects = projects ?? [],
             TopTargets = targets ?? [],
+            Context = new BuildContext(),
+            CategoryTotals = new Dictionary<TargetCategory, TimeSpan>(),
+            ExecutedTargetCount = 0,
+            SkippedTargetCount = 0,
+            PotentiallyCustomTargets = [],
+            CriticalPath = criticalPath ?? [],
+            CriticalPathTotal = criticalPathTotal ?? TimeSpan.Zero,
         };
     }
 
@@ -31,23 +40,26 @@ public sealed class BuildAnalyzerTests
         {
             Name = name,
             FullPath = $"C:\\src\\{name}\\{name}.csproj",
-            Duration = TimeSpan.FromSeconds(seconds),
+            SelfTime = TimeSpan.FromSeconds(seconds),
             Succeeded = true,
             ErrorCount = 0,
             WarningCount = warningCount,
-            Percentage = percentage,
+            SelfPercent = percentage,
             StartOffset = TimeSpan.Zero,
             EndOffset = TimeSpan.FromSeconds(seconds),
         };
 
-    private static TargetTiming CreateTarget(string name, string project, double seconds, double percentage) =>
+    private static TargetTiming CreateTarget(string name, string project, double seconds, double percentage, TargetCategory? category = null) =>
         new()
         {
             Name = name,
             ProjectName = project,
-            Duration = TimeSpan.FromSeconds(seconds),
-            Percentage = percentage,
+            SelfTime = TimeSpan.FromSeconds(seconds),
+            SelfPercent = percentage,
+            Category = category ?? TargetCategorizer.Categorize(name),
         };
+
+    // ────────────────────────── Short build ─────────────────────────
 
     [Test]
     public async Task ShortBuild_ReturnsEmpty()
@@ -59,17 +71,16 @@ public sealed class BuildAnalyzerTests
         await Assert.That(result.Recommendations.Count).IsEqualTo(0);
     }
 
+    // ────────────────────────── Bottleneck ──────────────────────────
+
     [Test]
     public async Task SingleProject_NoBottleneckFinding()
     {
-        var projects = new List<ProjectTiming>
-        {
-            CreateProject("OnlyProject", 30, 100),
-        };
+        var projects = new List<ProjectTiming> { CreateProject("OnlyProject", 30, 100) };
         var report = CreateReport(projects: projects);
         var result = BuildAnalyzer.Analyze(report);
 
-        await Assert.That(result.Findings.Any(f => f.Title.Contains("bottleneck"))).IsFalse();
+        await Assert.That(result.Findings.Any(f => f.Title.Contains("largest share"))).IsFalse();
     }
 
     [Test]
@@ -83,10 +94,10 @@ public sealed class BuildAnalyzerTests
         var report = CreateReport(projects: projects);
         var result = BuildAnalyzer.Analyze(report);
 
-        var bottleneck = result.Findings.FirstOrDefault(f => f.Title.Contains("bottleneck"));
-        await Assert.That(bottleneck).IsNotNull();
-        await Assert.That(bottleneck!.Severity).IsEqualTo(FindingSeverity.Critical);
-        await Assert.That(bottleneck.Title).Contains("BigProject");
+        var finding = result.Findings.FirstOrDefault(f => f.Title.Contains("largest share"));
+        await Assert.That(finding).IsNotNull();
+        await Assert.That(finding!.Severity).IsEqualTo(FindingSeverity.Critical);
+        await Assert.That(finding.Title).Contains("BigProject");
     }
 
     [Test]
@@ -100,10 +111,32 @@ public sealed class BuildAnalyzerTests
         var report = CreateReport(projects: projects);
         var result = BuildAnalyzer.Analyze(report);
 
-        var bottleneck = result.Findings.FirstOrDefault(f => f.Title.Contains("bottleneck"));
-        await Assert.That(bottleneck).IsNotNull();
-        await Assert.That(bottleneck!.Severity).IsEqualTo(FindingSeverity.Warning);
+        var finding = result.Findings.FirstOrDefault(f => f.Title.Contains("largest share"));
+        await Assert.That(finding).IsNotNull();
+        await Assert.That(finding!.Severity).IsEqualTo(FindingSeverity.Warning);
     }
+
+    // ────────────────────────── Evidence ─────────────────────────────
+
+    [Test]
+    public async Task Finding_IncludesEvidenceAndThreshold()
+    {
+        var projects = new List<ProjectTiming>
+        {
+            CreateProject("BigProject", 30, 50),
+            CreateProject("SmallProject", 5, 8.3),
+        };
+        var report = CreateReport(projects: projects);
+        var result = BuildAnalyzer.Analyze(report);
+
+        var finding = result.Findings.First(f => f.Title.Contains("largest share"));
+        await Assert.That(finding.Evidence).IsNotNull();
+        await Assert.That(finding.Evidence.Length).IsGreaterThan(0);
+        await Assert.That(finding.ThresholdName).IsNotNull();
+        await Assert.That(finding.ThresholdName).Contains("BottleneckCriticalPct");
+    }
+
+    // ────────────────────────── Disproportion ──────────────────────
 
     [Test]
     public async Task DisproportionatelySlowProject_Detected()
@@ -116,7 +149,7 @@ public sealed class BuildAnalyzerTests
         var report = CreateReport(projects: projects);
         var result = BuildAnalyzer.Analyze(report);
 
-        var finding = result.Findings.FirstOrDefault(f => f.Title.Contains("longer than the next"));
+        var finding = result.Findings.FirstOrDefault(f => f.Title.Contains("the next project"));
         await Assert.That(finding).IsNotNull();
         await Assert.That(finding!.Title).Contains("Slow");
     }
@@ -132,30 +165,13 @@ public sealed class BuildAnalyzerTests
         var report = CreateReport(projects: projects);
         var result = BuildAnalyzer.Analyze(report);
 
-        await Assert.That(result.Findings.Any(f => f.Title.Contains("longer than the next"))).IsFalse();
+        await Assert.That(result.Findings.Any(f => f.Title.Contains("the next project"))).IsFalse();
     }
 
-    [Test]
-    public async Task DominantTargetType_Detected()
-    {
-        var targets = new List<TargetTiming>
-        {
-            CreateTarget("CoreCompile", "A", 10, 16.7),
-            CreateTarget("CoreCompile", "B", 8, 13.3),
-            CreateTarget("CoreCompile", "C", 6, 10),
-            CreateTarget("ResolveReferences", "A", 4, 6.7),
-            CreateTarget("GenerateResource", "B", 2, 3.3),
-        };
-        var report = CreateReport(targets: targets);
-        var result = BuildAnalyzer.Analyze(report);
-
-        var finding = result.Findings.FirstOrDefault(f => f.Title.Contains("dominates"));
-        await Assert.That(finding).IsNotNull();
-        await Assert.That(finding!.Title).Contains("CoreCompile");
-    }
+    // ────────────────────────── Outlier targets ─────────────────────
 
     [Test]
-    public async Task UnusuallySlowTarget_Detected()
+    public async Task OutlierTarget_Detected()
     {
         var targets = new List<TargetTiming>
         {
@@ -167,10 +183,12 @@ public sealed class BuildAnalyzerTests
         var report = CreateReport(targets: targets);
         var result = BuildAnalyzer.Analyze(report);
 
-        var finding = result.Findings.FirstOrDefault(f => f.Title.Contains("unusually slow"));
+        var finding = result.Findings.FirstOrDefault(f => f.Title.Contains("is an outlier"));
         await Assert.That(finding).IsNotNull();
         await Assert.That(finding!.Title).Contains("Outlier");
     }
+
+    // ────────────────────────── ResolvePackageAssets ─────────────────
 
     [Test]
     public async Task CostlyResolvePackageAssets_Detected()
@@ -200,6 +218,8 @@ public sealed class BuildAnalyzerTests
         await Assert.That(result.Findings.Any(f => f.Title.Contains("ResolvePackageAssets"))).IsFalse();
     }
 
+    // ────────────────────────── Warnings ────────────────────────────
+
     [Test]
     public async Task WarningConcentration_DetectedWhenConcentrated()
     {
@@ -214,9 +234,29 @@ public sealed class BuildAnalyzerTests
         var report = CreateReport(projects: projects, warningCount: 30);
         var result = BuildAnalyzer.Analyze(report);
 
-        var finding = result.Findings.FirstOrDefault(f => f.Title.Contains("warnings"));
+        var finding = result.Findings.FirstOrDefault(f => f.Title.Contains("concentrated"));
         await Assert.That(finding).IsNotNull();
     }
+
+    // ────────────────────────── Critical Path ───────────────────────
+
+    [Test]
+    public async Task CriticalPath_FindingShownWhenConcentrated()
+    {
+        var a = CreateProject("A", 30, 60);
+        var b = CreateProject("B", 15, 30);
+        var c = CreateProject("C", 5, 10);
+        var report = CreateReport(
+            projects: [a, b, c],
+            criticalPath: [a, b],
+            criticalPathTotal: TimeSpan.FromSeconds(45));
+
+        var result = BuildAnalyzer.Analyze(report);
+        var finding = result.Findings.FirstOrDefault(f => f.Title.Contains("Critical path"));
+        await Assert.That(finding).IsNotNull();
+    }
+
+    // ────────────────────────── Numbering ───────────────────────────
 
     [Test]
     public async Task Findings_AreNumberedSequentially()
@@ -234,9 +274,7 @@ public sealed class BuildAnalyzerTests
         var result = BuildAnalyzer.Analyze(report);
 
         for (int i = 0; i < result.Findings.Count; i++)
-        {
             await Assert.That(result.Findings[i].Number).IsEqualTo(i + 1);
-        }
     }
 
     [Test]
@@ -252,26 +290,27 @@ public sealed class BuildAnalyzerTests
 
         await Assert.That(result.Recommendations.Count).IsGreaterThan(0);
         for (int i = 0; i < result.Recommendations.Count; i++)
-        {
             await Assert.That(result.Recommendations[i].Number).IsEqualTo(i + 1);
-        }
     }
 
+    // ────────────────────────── Recommendation wording ──────────────
+
     [Test]
-    public async Task ProjectCluster_Detected()
+    public async Task Recommendations_DoNotContainStructuralConclusions()
     {
+        // Hard rule: no "split the project", no "refactor", etc — investigation-only language
         var projects = new List<ProjectTiming>
         {
-            CreateProject("A", 10, 20),
-            CreateProject("B", 9.5, 19),
-            CreateProject("C", 9.2, 18.4),
-            CreateProject("D", 9.0, 18),
+            CreateProject("Slow", 40, 80),
+            CreateProject("Fast", 5, 10),
         };
         var report = CreateReport(projects: projects);
         var result = BuildAnalyzer.Analyze(report);
 
-        var finding = result.Findings.FirstOrDefault(f => f.Title.Contains("cluster"));
-        await Assert.That(finding).IsNotNull();
-        await Assert.That(finding!.Severity).IsEqualTo(FindingSeverity.Info);
+        foreach (var rec in result.Recommendations)
+        {
+            await Assert.That(rec.Text.Contains("split", StringComparison.OrdinalIgnoreCase)).IsFalse();
+            await Assert.That(rec.Text.Contains("refactor", StringComparison.OrdinalIgnoreCase)).IsFalse();
+        }
     }
 }
