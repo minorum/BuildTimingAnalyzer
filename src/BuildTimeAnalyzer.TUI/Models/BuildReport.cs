@@ -30,13 +30,16 @@ public sealed record BuildReport
     // Span-vs-self outliers (projects waiting on the graph)
     public required IReadOnlyList<ProjectTiming> SpanOutliers { get; init; }
 
-    // Dependency graph (extracted from ProjectReference items)
+    // Project Count Tax indicators — how fragmented the solution is
+    public required ProjectCountTaxStats ProjectCountTax { get; init; }
+
+    // Dependency graph
     public required DependencyGraph Graph { get; init; }
 
-    // Critical path — only populated if CPM validation passed AND the graph is usable.
-    // Empty list + zero total means: do not render critical path anywhere in the report.
+    // Critical path — only populated if validation passed AND the graph is usable
     public required IReadOnlyList<ProjectTiming> CriticalPath { get; init; }
     public required TimeSpan CriticalPathTotal { get; init; }
+    public required CriticalPathValidation CriticalPathValidation { get; init; }
 }
 
 public sealed record ProjectTiming
@@ -62,6 +65,13 @@ public sealed record ProjectTiming
 
     /// <summary>Targets belonging to this project (ordered by SelfTime desc). Populated for drill-down candidates only.</summary>
     public IReadOnlyList<TargetTiming> Targets { get; init; } = [];
+
+    /// <summary>Per-category self time sums. Populated for drill-down candidates only.</summary>
+    public IReadOnlyDictionary<TargetCategory, TimeSpan> CategoryBreakdown { get; init; } =
+        new Dictionary<TargetCategory, TimeSpan>();
+
+    /// <summary>Name-based heuristic classification. Never authoritative.</summary>
+    public ProjectKind KindHeuristic { get; init; } = ProjectKind.Other;
 }
 
 public sealed record TargetTiming
@@ -94,6 +104,20 @@ public enum TargetCategory
     Other,
 }
 
+/// <summary>
+/// Name-based heuristic classification of a project. Must always be presented to the user as
+/// "heuristic" — the report never treats this as an authoritative claim about the project's role.
+/// </summary>
+public enum ProjectKind
+{
+    /// <summary>Name matches a test-project pattern (e.g. ends in "Tests" or "Test").</summary>
+    Test,
+    /// <summary>Name matches a benchmark-project pattern (e.g. contains "Benchmark").</summary>
+    Benchmark,
+    /// <summary>Does not match any known pattern. No claim about the project's role.</summary>
+    Other,
+}
+
 public sealed record BuildContext
 {
     public string? Configuration { get; init; }
@@ -104,10 +128,6 @@ public sealed record BuildContext
     public bool? RestoreObserved { get; init; }
 }
 
-/// <summary>
-/// Aggregate reference-related cost across the whole solution. Null if the solution has no
-/// reference-category work or only a single project.
-/// </summary>
 public sealed record ReferenceOverheadStats
 {
     public required TimeSpan TotalSelfTime { get; init; }
@@ -127,6 +147,37 @@ public sealed record ReferenceOverheadProject
 }
 
 /// <summary>
+/// Indicators of "project count tax" — whether the solution pays graph/orchestration cost
+/// disproportionate to the local work it produces.
+/// </summary>
+public sealed record ProjectCountTaxStats
+{
+    /// <summary>Count of projects where reference-category self time &gt; compile-category self time.</summary>
+    public required int ReferencesExceedCompileCount { get; init; }
+
+    /// <summary>Count of projects where reference-category self time is the majority (&gt; 50%) of the project's self time.</summary>
+    public required int ReferencesMajorityCount { get; init; }
+
+    /// <summary>Count of projects matching the span outlier rule (tiny self, huge span).</summary>
+    public required int TinySelfHugeSpanCount { get; init; }
+
+    public required int TotalProjects { get; init; }
+
+    /// <summary>Heuristic per-kind stats. Kind classification is name-based and not authoritative.</summary>
+    public required IReadOnlyList<ProjectKindStats> PerKindStats { get; init; }
+}
+
+public sealed record ProjectKindStats
+{
+    public required ProjectKind Kind { get; init; }
+    public required int Count { get; init; }
+    public required TimeSpan MedianSelfTime { get; init; }
+    public required TimeSpan MedianSpan { get; init; }
+    /// <summary>Median of Span/SelfTime across projects of this kind. 0 if any member has zero SelfTime.</summary>
+    public required double MedianSpanToSelfRatio { get; init; }
+}
+
+/// <summary>
 /// Project dependency graph extracted from ProjectReference items on ProjectStartedEventArgs.Items.
 /// </summary>
 public sealed record DependencyGraph
@@ -136,6 +187,9 @@ public sealed record DependencyGraph
     public required IReadOnlyList<ProjectGraphNode> TopHubs { get; init; }
     public required int LongestChainProjectCount { get; init; }
     public required IReadOnlyList<IReadOnlyList<string>> Cycles { get; init; }
+
+    /// <summary>True when cycle detection has been attempted. Use instead of inferring from Cycles.Count.</summary>
+    public required bool CycleDetectionRan { get; init; }
 
     /// <summary>True if the graph has enough structure to trust derived analyses like critical path.</summary>
     public required bool IsUsable { get; init; }
@@ -156,4 +210,21 @@ public sealed record ProjectGraphNode
     public required string FullPath { get; init; }
     public required int OutgoingCount { get; init; }
     public required int IncomingCount { get; init; }
+    /// <summary>Transitive dependents = all projects that reach this node via the dependency DAG.</summary>
+    public required int TransitiveDependentsCount { get; init; }
+    /// <summary>Transitive dependencies = all projects this node reaches via the dependency DAG.</summary>
+    public required int TransitiveDependenciesCount { get; init; }
+}
+
+/// <summary>
+/// Validation record for the critical path computation. Always populated so the report can
+/// display an explicit accept/reject status with the underlying numbers that justified it.
+/// </summary>
+public sealed record CriticalPathValidation
+{
+    public required TimeSpan ComputedTotal { get; init; }
+    public required TimeSpan WallClock { get; init; }
+    public required bool Accepted { get; init; }
+    public required string Reason { get; init; }
+    public required bool GraphWasUsable { get; init; }
 }

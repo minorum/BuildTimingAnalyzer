@@ -52,9 +52,11 @@ public sealed class JsonReportExporterTests
             PotentiallyCustomTargets = [],
             ReferenceOverhead = null,
             SpanOutliers = [],
+            ProjectCountTax = TestDefaults.EmptyTax(1),
             Graph = TestDefaults.EmptyGraph(1),
             CriticalPath = [],
             CriticalPathTotal = TimeSpan.Zero,
+            CriticalPathValidation = TestDefaults.EmptyValidation(),
         };
     }
 
@@ -148,7 +150,9 @@ public sealed class JsonReportExporterTests
                 {
                     Number = 1,
                     Title = "Test finding",
-                    Detail = "Test detail",
+                    Measured = "Test measured",
+                    LikelyExplanation = "Test likely",
+                    InvestigationSuggestion = "Test investigate",
                     Severity = FindingSeverity.Warning,
                     Evidence = "SelfTime=10s",
                     ThresholdName = "BottleneckWarningPct=15%",

@@ -6,9 +6,9 @@ namespace BuildTimeAnalyzer.Services;
 
 public sealed class LogAnalyzer
 {
-    private const int DrillDownTopN = 3;
+    private const int DrillDownTopN = 5;
 
-    // Span-vs-self outlier rule (matches the spec exactly)
+    // Span-vs-self outlier rule
     private const double SpanOutlierMinSpanSeconds = 5.0;
     private const double SpanOutlierMinRatio = 5.0;
     private const double SpanOutlierMinGapSeconds = 3.0;
@@ -30,11 +30,9 @@ public sealed class LogAnalyzer
         var projectTimings = new Dictionary<int, ProjectAccumulator>(256);
         var targetTimings = new List<RawTargetTiming>(4096);
 
-        // Orchestration task (MSBuild/CallTarget) handling
         var runningOrchTasks = new Dictionary<(int ProjectInstanceId, int TaskId), (int TargetId, DateTime StartTime)>();
         var orchTaskDurations = new Dictionary<(int ProjectInstanceId, int TargetId), TimeSpan>();
 
-        // Raw edges: parent project full path → set of dependency full paths (resolved + normalized)
         var rawEdges = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
 
         int executedTargets = 0;
@@ -84,8 +82,6 @@ public sealed class LogAnalyzer
                             StartTime = pse.Timestamp,
                         });
 
-                        // Fallback item extraction — ProjectStartedEventArgs.Items is often null in binlogs,
-                        // the authoritative source is ProjectEvaluationFinishedEventArgs handled below.
                         if (pse.Items is not null)
                             ExtractProjectReferences(projectFile, pse.Items, rawEdges);
 
@@ -101,12 +97,9 @@ public sealed class LogAnalyzer
                     }
 
                 case Microsoft.Build.Framework.ProjectEvaluationFinishedEventArgs pef:
-                    {
-                        // Primary source of ProjectReference items — always populated in modern binlogs
-                        if (pef.Items is not null && !string.IsNullOrEmpty(pef.ProjectFile))
-                            ExtractProjectReferences(pef.ProjectFile, pef.Items, rawEdges);
-                        break;
-                    }
+                    if (pef.Items is not null && !string.IsNullOrEmpty(pef.ProjectFile))
+                        ExtractProjectReferences(pef.ProjectFile, pef.Items, rawEdges);
+                    break;
 
                 case Microsoft.Build.Framework.ProjectFinishedEventArgs pfe:
                     {
@@ -270,6 +263,7 @@ public sealed class LogAnalyzer
                     SelfPercent = totalSelfMs > 0 ? best.ExclusiveTime.TotalMilliseconds / totalSelfMs * 100 : 0,
                     StartOffset = span.First,
                     EndOffset = span.Last,
+                    KindHeuristic = ProjectKindHeuristic.Classify(best.Acc.Name),
                 };
             })
             .OrderByDescending(p => p.SelfTime)
@@ -308,6 +302,18 @@ public sealed class LogAnalyzer
             .OrderByDescending(t => t.SelfTime)
             .ToList();
 
+        // Per-project category breakdowns (for drill-down and project-count-tax analysis)
+        var categoryByProject = allTargets
+            .GroupBy(t => t.ProjectName, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                g => g.Key,
+                g => (IReadOnlyDictionary<TargetCategory, TimeSpan>)g
+                    .GroupBy(t => t.Category)
+                    .ToDictionary(
+                        x => x.Key,
+                        x => TimeSpan.FromMilliseconds(x.Sum(t => t.SelfTime.TotalMilliseconds))),
+                StringComparer.OrdinalIgnoreCase);
+
         // ── Reference overhead stats ───────────────────────────────────
         var referenceOverhead = ComputeReferenceOverhead(allTargets, projectList);
 
@@ -321,6 +327,9 @@ public sealed class LogAnalyzer
             .OrderByDescending(p => p.Span.TotalMilliseconds / Math.Max(1, p.SelfTime.TotalMilliseconds))
             .ToList();
 
+        // ── Project count tax ──────────────────────────────────────────
+        var projectCountTax = ComputeProjectCountTax(projectList, categoryByProject, spanOutliers);
+
         // ── Dependency graph ───────────────────────────────────────────
         var rawEdgesReadOnly = rawEdges.ToDictionary(
             kv => kv.Key,
@@ -329,15 +338,11 @@ public sealed class LogAnalyzer
         var graph = DependencyGraphAnalyzer.Build(projectList, rawEdgesReadOnly);
         var depsMap = DependencyGraphAnalyzer.ToDependencyMap(projectList, rawEdgesReadOnly);
 
-        // ── Critical path — only if the graph is usable ────────────────
-        IReadOnlyList<ProjectTiming> criticalPath = [];
-        TimeSpan criticalPathTotal = TimeSpan.Zero;
-        if (graph.IsUsable)
-        {
-            (criticalPath, criticalPathTotal) = CriticalPathAnalyzer.Compute(projectList, depsMap, wallClock);
-        }
+        // ── Critical path (always returns validation) ──────────────────
+        var (criticalPath, criticalPathTotal, cpValidation) =
+            CriticalPathAnalyzer.Compute(projectList, depsMap, wallClock, graph.IsUsable);
 
-        // ── Drill-down ─────────────────────────────────────────────────
+        // ── Drill-down: populate Targets + CategoryBreakdown for top N and critical path ──
         var drillDownPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var p in projectList.Take(DrillDownTopN)) drillDownPaths.Add(p.FullPath);
         foreach (var p in criticalPath) drillDownPaths.Add(p.FullPath);
@@ -352,8 +357,14 @@ public sealed class LogAnalyzer
             for (int i = 0; i < projectList.Count; i++)
             {
                 if (!drillDownPaths.Contains(projectList[i].FullPath)) continue;
-                if (!targetsByProjectName.TryGetValue(projectList[i].Name, out var targets)) continue;
-                projectList[i] = projectList[i] with { Targets = targets };
+                var targets = targetsByProjectName.GetValueOrDefault(projectList[i].Name) ?? new List<TargetTiming>();
+                var breakdown = categoryByProject.GetValueOrDefault(projectList[i].Name)
+                    ?? new Dictionary<TargetCategory, TimeSpan>();
+                projectList[i] = projectList[i] with
+                {
+                    Targets = targets,
+                    CategoryBreakdown = breakdown,
+                };
             }
             criticalPath = criticalPath
                 .Select(cp => projectList.FirstOrDefault(p =>
@@ -387,9 +398,11 @@ public sealed class LogAnalyzer
             PotentiallyCustomTargets = potentiallyCustom,
             ReferenceOverhead = referenceOverhead,
             SpanOutliers = spanOutliers,
+            ProjectCountTax = projectCountTax,
             Graph = graph,
             CriticalPath = criticalPath,
             CriticalPathTotal = criticalPathTotal,
+            CriticalPathValidation = cpValidation,
         };
     }
 
@@ -417,8 +430,6 @@ public sealed class LogAnalyzer
 
         foreach (var raw in items)
         {
-            // Items come through as DictionaryEntry(string itemType, ITaskItem item).
-            // Be defensive about alternative shapes some MSBuild versions use.
             string? itemType = null;
             Microsoft.Build.Framework.ITaskItem? item = null;
 
@@ -460,7 +471,6 @@ public sealed class LogAnalyzer
     {
         if (projects.Count == 0) return null;
 
-        // Per-project reference self time (grouped by ProjectName)
         var refByProject = allTargets
             .Where(t => t.Category == TargetCategory.References)
             .GroupBy(t => t.ProjectName, StringComparer.OrdinalIgnoreCase)
@@ -496,6 +506,62 @@ public sealed class LogAnalyzer
             TotalProjectsCount = projects.Count,
             MedianPerPayingProject = median,
             TopProjects = top,
+        };
+    }
+
+    private static ProjectCountTaxStats ComputeProjectCountTax(
+        List<ProjectTiming> projects,
+        Dictionary<string, IReadOnlyDictionary<TargetCategory, TimeSpan>> categoryByProject,
+        List<ProjectTiming> spanOutliers)
+    {
+        int refsExceedCompile = 0;
+        int refsMajority = 0;
+
+        foreach (var p in projects)
+        {
+            if (!categoryByProject.TryGetValue(p.Name, out var cats)) continue;
+            var refs = cats.GetValueOrDefault(TargetCategory.References).TotalMilliseconds;
+            var compile = cats.GetValueOrDefault(TargetCategory.Compile).TotalMilliseconds;
+            var selfMs = p.SelfTime.TotalMilliseconds;
+
+            if (refs > compile && refs > 0) refsExceedCompile++;
+            if (selfMs > 0 && refs / selfMs > 0.5) refsMajority++;
+        }
+
+        var perKind = projects
+            .GroupBy(p => p.KindHeuristic)
+            .Select(g =>
+            {
+                var sorted = g.OrderBy(p => p.SelfTime.TotalMilliseconds).ToList();
+                var medianSelf = sorted[sorted.Count / 2].SelfTime;
+                var sortedSpan = g.OrderBy(p => p.Span.TotalMilliseconds).ToList();
+                var medianSpan = sortedSpan[sortedSpan.Count / 2].Span;
+                var ratios = g
+                    .Where(p => p.SelfTime.TotalMilliseconds > 0)
+                    .Select(p => p.Span.TotalMilliseconds / p.SelfTime.TotalMilliseconds)
+                    .OrderBy(r => r)
+                    .ToList();
+                var medianRatio = ratios.Count == 0 ? 0 : ratios[ratios.Count / 2];
+
+                return new ProjectKindStats
+                {
+                    Kind = g.Key,
+                    Count = g.Count(),
+                    MedianSelfTime = medianSelf,
+                    MedianSpan = medianSpan,
+                    MedianSpanToSelfRatio = medianRatio,
+                };
+            })
+            .OrderBy(s => s.Kind)
+            .ToList();
+
+        return new ProjectCountTaxStats
+        {
+            ReferencesExceedCompileCount = refsExceedCompile,
+            ReferencesMajorityCount = refsMajority,
+            TinySelfHugeSpanCount = spanOutliers.Count,
+            TotalProjects = projects.Count,
+            PerKindStats = perKind,
         };
     }
 

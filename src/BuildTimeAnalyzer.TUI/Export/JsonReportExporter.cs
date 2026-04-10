@@ -71,7 +71,25 @@ public static class JsonReportExporter
             Ratio = p.SelfTime.TotalMilliseconds > 0
                 ? Math.Round(p.Span.TotalMilliseconds / p.SelfTime.TotalMilliseconds, 2)
                 : 0,
+            KindHeuristic = p.KindHeuristic.ToString(),
         }).ToList(),
+        ProjectCountTax = new JsonProjectCountTaxDto
+        {
+            ReferencesExceedCompileCount = report.ProjectCountTax.ReferencesExceedCompileCount,
+            ReferencesMajorityCount = report.ProjectCountTax.ReferencesMajorityCount,
+            TinySelfHugeSpanCount = report.ProjectCountTax.TinySelfHugeSpanCount,
+            TotalProjects = report.ProjectCountTax.TotalProjects,
+            PerKindStats = report.ProjectCountTax.PerKindStats.Select(s => new JsonProjectKindStatsDto
+            {
+                Kind = s.Kind.ToString(),
+                Count = s.Count,
+                MedianSelfTimeMs = (long)s.MedianSelfTime.TotalMilliseconds,
+                MedianSelfTime = ConsoleReportRenderer.FormatDuration(s.MedianSelfTime),
+                MedianSpanMs = (long)s.MedianSpan.TotalMilliseconds,
+                MedianSpan = ConsoleReportRenderer.FormatDuration(s.MedianSpan),
+                MedianSpanToSelfRatio = Math.Round(s.MedianSpanToSelfRatio, 2),
+            }).ToList(),
+        },
         Graph = new JsonDependencyGraphDto
         {
             Health = new JsonGraphHealthDto
@@ -83,6 +101,7 @@ public static class JsonReportExporter
                 NodesWithIncoming = report.Graph.Health.NodesWithIncoming,
             },
             IsUsable = report.Graph.IsUsable,
+            CycleDetectionRan = report.Graph.CycleDetectionRan,
             LongestChainProjectCount = report.Graph.LongestChainProjectCount,
             TopHubs = report.Graph.TopHubs.Select(h => new JsonGraphNodeDto
             {
@@ -90,6 +109,8 @@ public static class JsonReportExporter
                 FullPath = h.FullPath,
                 OutgoingCount = h.OutgoingCount,
                 IncomingCount = h.IncomingCount,
+                TransitiveDependentsCount = h.TransitiveDependentsCount,
+                TransitiveDependenciesCount = h.TransitiveDependenciesCount,
             }).ToList(),
             Cycles = report.Graph.Cycles.Select(c => c.ToList()).ToList(),
         },
@@ -99,9 +120,20 @@ public static class JsonReportExporter
             FullPath = p.FullPath,
             SelfTimeMs = (long)p.SelfTime.TotalMilliseconds,
             SelfTime = ConsoleReportRenderer.FormatDuration(p.SelfTime),
+            KindHeuristic = p.KindHeuristic.ToString(),
         }).ToList(),
         CriticalPathTotalMs = (long)report.CriticalPathTotal.TotalMilliseconds,
         CriticalPathTotal = ConsoleReportRenderer.FormatDuration(report.CriticalPathTotal),
+        CriticalPathValidation = new JsonCriticalPathValidationDto
+        {
+            ComputedTotalMs = (long)report.CriticalPathValidation.ComputedTotal.TotalMilliseconds,
+            ComputedTotal = ConsoleReportRenderer.FormatDuration(report.CriticalPathValidation.ComputedTotal),
+            WallClockMs = (long)report.CriticalPathValidation.WallClock.TotalMilliseconds,
+            WallClock = ConsoleReportRenderer.FormatDuration(report.CriticalPathValidation.WallClock),
+            Accepted = report.CriticalPathValidation.Accepted,
+            Reason = report.CriticalPathValidation.Reason,
+            GraphWasUsable = report.CriticalPathValidation.GraphWasUsable,
+        },
         Analysis = analysis is not null
             ? new JsonAnalysisDto
             {
@@ -110,7 +142,9 @@ public static class JsonReportExporter
                     Number = f.Number,
                     Severity = f.Severity.ToString().ToLowerInvariant(),
                     Title = f.Title,
-                    Detail = f.Detail,
+                    Measured = f.Measured,
+                    LikelyExplanation = f.LikelyExplanation,
+                    Investigate = f.InvestigationSuggestion,
                     Evidence = f.Evidence,
                     Threshold = f.ThresholdName,
                 }).ToList(),
@@ -135,7 +169,11 @@ public static class JsonReportExporter
         Succeeded = p.Succeeded,
         ErrorCount = p.ErrorCount,
         WarningCount = p.WarningCount,
+        KindHeuristic = p.KindHeuristic.ToString(),
         Targets = p.Targets.Count == 0 ? null : p.Targets.Select(ToTargetDto).ToList(),
+        CategoryBreakdown = p.CategoryBreakdown.Count == 0 ? null : p.CategoryBreakdown.ToDictionary(
+            kv => kv.Key.ToString(),
+            kv => (long)kv.Value.TotalMilliseconds),
     };
 
     private static JsonTargetDto ToTargetDto(TargetTiming t) => new()
@@ -176,10 +214,12 @@ internal sealed class JsonReportDto
     public required Dictionary<string, long> CategoryTotals { get; init; }
     public JsonReferenceOverheadDto? ReferenceOverhead { get; init; }
     public required List<JsonSpanOutlierDto> SpanOutliers { get; init; }
+    public required JsonProjectCountTaxDto ProjectCountTax { get; init; }
     public required JsonDependencyGraphDto Graph { get; init; }
     public required List<JsonCriticalPathNodeDto> CriticalPath { get; init; }
     public required long CriticalPathTotalMs { get; init; }
     public required string CriticalPathTotal { get; init; }
+    public required JsonCriticalPathValidationDto CriticalPathValidation { get; init; }
     public JsonAnalysisDto? Analysis { get; init; }
 }
 
@@ -207,7 +247,9 @@ internal sealed class JsonProjectDto
     public required bool Succeeded { get; init; }
     public required int ErrorCount { get; init; }
     public required int WarningCount { get; init; }
+    public required string KindHeuristic { get; init; }
     public List<JsonTargetDto>? Targets { get; init; }
+    public Dictionary<string, long>? CategoryBreakdown { get; init; }
 }
 
 internal sealed class JsonTargetDto
@@ -249,12 +291,34 @@ internal sealed class JsonSpanOutlierDto
     public required long SelfTimeMs { get; init; }
     public required string SelfTime { get; init; }
     public required double Ratio { get; init; }
+    public required string KindHeuristic { get; init; }
+}
+
+internal sealed class JsonProjectCountTaxDto
+{
+    public required int ReferencesExceedCompileCount { get; init; }
+    public required int ReferencesMajorityCount { get; init; }
+    public required int TinySelfHugeSpanCount { get; init; }
+    public required int TotalProjects { get; init; }
+    public required List<JsonProjectKindStatsDto> PerKindStats { get; init; }
+}
+
+internal sealed class JsonProjectKindStatsDto
+{
+    public required string Kind { get; init; }
+    public required int Count { get; init; }
+    public required long MedianSelfTimeMs { get; init; }
+    public required string MedianSelfTime { get; init; }
+    public required long MedianSpanMs { get; init; }
+    public required string MedianSpan { get; init; }
+    public required double MedianSpanToSelfRatio { get; init; }
 }
 
 internal sealed class JsonDependencyGraphDto
 {
     public required JsonGraphHealthDto Health { get; init; }
     public required bool IsUsable { get; init; }
+    public required bool CycleDetectionRan { get; init; }
     public required int LongestChainProjectCount { get; init; }
     public required List<JsonGraphNodeDto> TopHubs { get; init; }
     public required List<List<string>> Cycles { get; init; }
@@ -275,6 +339,8 @@ internal sealed class JsonGraphNodeDto
     public required string FullPath { get; init; }
     public required int OutgoingCount { get; init; }
     public required int IncomingCount { get; init; }
+    public required int TransitiveDependentsCount { get; init; }
+    public required int TransitiveDependenciesCount { get; init; }
 }
 
 internal sealed class JsonCriticalPathNodeDto
@@ -283,6 +349,18 @@ internal sealed class JsonCriticalPathNodeDto
     public required string FullPath { get; init; }
     public required long SelfTimeMs { get; init; }
     public required string SelfTime { get; init; }
+    public required string KindHeuristic { get; init; }
+}
+
+internal sealed class JsonCriticalPathValidationDto
+{
+    public required long ComputedTotalMs { get; init; }
+    public required string ComputedTotal { get; init; }
+    public required long WallClockMs { get; init; }
+    public required string WallClock { get; init; }
+    public required bool Accepted { get; init; }
+    public required string Reason { get; init; }
+    public required bool GraphWasUsable { get; init; }
 }
 
 internal sealed class JsonAnalysisDto
@@ -296,7 +374,9 @@ internal sealed class JsonFindingDto
     public required int Number { get; init; }
     public required string Severity { get; init; }
     public required string Title { get; init; }
-    public required string Detail { get; init; }
+    public required string Measured { get; init; }
+    public string? LikelyExplanation { get; init; }
+    public required string Investigate { get; init; }
     public required string Evidence { get; init; }
     public required string Threshold { get; init; }
 }

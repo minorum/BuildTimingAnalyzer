@@ -21,33 +21,36 @@ public sealed class CriticalPathAnalyzerTests
     [Test]
     public async Task EmptyProjects_ReturnsEmptyPath()
     {
-        var (path, total) = CriticalPathAnalyzer.Compute(
+        var (path, total, validation) = CriticalPathAnalyzer.Compute(
             [],
             new Dictionary<string, IReadOnlyList<string>>(),
-            TimeSpan.FromSeconds(10));
+            TimeSpan.FromSeconds(10),
+            graphIsUsable: true);
 
         await Assert.That(path.Count).IsEqualTo(0);
         await Assert.That(total).IsEqualTo(TimeSpan.Zero);
+        await Assert.That(validation.Accepted).IsFalse();
     }
 
     [Test]
     public async Task SingleProject_ReturnsThatProject()
     {
         var a = P("A", 5);
-        var (path, total) = CriticalPathAnalyzer.Compute(
+        var (path, total, validation) = CriticalPathAnalyzer.Compute(
             [a],
             new Dictionary<string, IReadOnlyList<string>>(),
-            TimeSpan.FromSeconds(10));
+            TimeSpan.FromSeconds(10),
+            graphIsUsable: true);
 
         await Assert.That(path.Count).IsEqualTo(1);
         await Assert.That(path[0].Name).IsEqualTo("A");
         await Assert.That(total).IsEqualTo(TimeSpan.FromSeconds(5));
+        await Assert.That(validation.Accepted).IsTrue();
     }
 
     [Test]
     public async Task Chain_ReturnsLongestPath()
     {
-        // A depends on B (5s), B depends on C (10s). C → B → A should be the path.
         var a = P("A", 3);
         var b = P("B", 5);
         var c = P("C", 10);
@@ -58,23 +61,22 @@ public sealed class CriticalPathAnalyzerTests
             [b.FullPath] = new[] { c.FullPath },
         };
 
-        var (path, total) = CriticalPathAnalyzer.Compute([a, b, c], deps, TimeSpan.FromSeconds(30));
+        var (path, total, validation) = CriticalPathAnalyzer.Compute([a, b, c], deps, TimeSpan.FromSeconds(30), graphIsUsable: true);
 
         await Assert.That(path.Count).IsEqualTo(3);
         await Assert.That(path[0].Name).IsEqualTo("C");
         await Assert.That(path[1].Name).IsEqualTo("B");
         await Assert.That(path[2].Name).IsEqualTo("A");
         await Assert.That(total).IsEqualTo(TimeSpan.FromSeconds(18));
+        await Assert.That(validation.Accepted).IsTrue();
     }
 
     [Test]
     public async Task Diamond_PicksLongerBranch()
     {
-        // A depends on B and C; B depends on D (fast); C depends on D (slow).
-        // Actually better diamond: A → B, A → C, B → D, C → D. Path cost = D + max(B, C) + A.
         var a = P("A", 2);
-        var b = P("B", 8);  // fast branch
-        var c = P("C", 20); // slow branch
+        var b = P("B", 8);
+        var c = P("C", 20);
         var d = P("D", 5);
 
         var deps = new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase)
@@ -84,9 +86,8 @@ public sealed class CriticalPathAnalyzerTests
             [c.FullPath] = new[] { d.FullPath },
         };
 
-        var (path, total) = CriticalPathAnalyzer.Compute([a, b, c, d], deps, TimeSpan.FromSeconds(60));
+        var (path, total, _) = CriticalPathAnalyzer.Compute([a, b, c, d], deps, TimeSpan.FromSeconds(60), graphIsUsable: true);
 
-        // Expected critical chain: D → C → A = 5 + 20 + 2 = 27s
         await Assert.That(total).IsEqualTo(TimeSpan.FromSeconds(27));
         await Assert.That(path.Select(p => p.Name).ToList()).Contains("C");
         await Assert.That(path.Select(p => p.Name).ToList()).Contains("A");
@@ -95,8 +96,6 @@ public sealed class CriticalPathAnalyzerTests
     [Test]
     public async Task ValidationGate_RejectsPathLongerThanWallClock()
     {
-        // Build a simple chain that totals 30s of self time, but wall clock was only 10s.
-        // This indicates a broken dependency model — the feature must refuse to ship the result.
         var a = P("A", 10);
         var b = P("B", 20);
 
@@ -105,11 +104,29 @@ public sealed class CriticalPathAnalyzerTests
             [a.FullPath] = new[] { b.FullPath },
         };
 
-        var (path, total) = CriticalPathAnalyzer.Compute([a, b], deps, TimeSpan.FromSeconds(10));
+        var (path, total, validation) = CriticalPathAnalyzer.Compute([a, b], deps, TimeSpan.FromSeconds(10), graphIsUsable: true);
 
-        // Rejected → empty result
         await Assert.That(path.Count).IsEqualTo(0);
         await Assert.That(total).IsEqualTo(TimeSpan.Zero);
+        await Assert.That(validation.Accepted).IsFalse();
+        await Assert.That(validation.GraphWasUsable).IsTrue();
+        await Assert.That(validation.Reason).Contains("exceeds wall clock");
+    }
+
+    [Test]
+    public async Task GraphNotUsable_SuppressesPath()
+    {
+        var a = P("A", 5);
+        var (path, total, validation) = CriticalPathAnalyzer.Compute(
+            [a],
+            new Dictionary<string, IReadOnlyList<string>>(),
+            TimeSpan.FromSeconds(10),
+            graphIsUsable: false);
+
+        await Assert.That(path.Count).IsEqualTo(0);
+        await Assert.That(total).IsEqualTo(TimeSpan.Zero);
+        await Assert.That(validation.Accepted).IsFalse();
+        await Assert.That(validation.GraphWasUsable).IsFalse();
     }
 
     [Test]
@@ -119,10 +136,11 @@ public sealed class CriticalPathAnalyzerTests
         var b = P("B", 12);
         var c = P("C", 3);
 
-        var (path, total) = CriticalPathAnalyzer.Compute(
+        var (path, total, _) = CriticalPathAnalyzer.Compute(
             [a, b, c],
             new Dictionary<string, IReadOnlyList<string>>(),
-            TimeSpan.FromSeconds(15));
+            TimeSpan.FromSeconds(15),
+            graphIsUsable: true);
 
         await Assert.That(path.Count).IsEqualTo(1);
         await Assert.That(path[0].Name).IsEqualTo("B");

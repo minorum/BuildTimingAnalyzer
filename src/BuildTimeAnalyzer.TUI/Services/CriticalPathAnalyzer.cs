@@ -3,33 +3,53 @@ using BuildTimeAnalyzer.Models;
 namespace BuildTimeAnalyzer.Services;
 
 /// <summary>
-/// Computes a project-level critical path using standard CPM:
+/// Computes a project-level critical path estimate using CPM:
 ///   • Node cost  = project SelfTime (verified exclusive)
-///   • Edges      = project dependency DAG (parent → child = "depends on")
+///   • Edges      = project dependency DAG (from ProjectReference items)
 ///   • Algorithm  = earliest_finish(p) = max(earliest_finish(d) for d in deps) + SelfTime(p)
 ///
-/// The result is an <i>estimate</i> of the longest sequential chain implied by the observed
-/// project DAG and measured self times — not a definitive statement about the minimum build time.
-///
-/// A validation gate rejects the computed path if its total exceeds the wall-clock build time,
-/// which would indicate an inconsistent or incomplete dependency model. In that case an empty
-/// critical path is returned and callers should omit the section from the report.
+/// The result is an <i>estimate</i> implied by the observed project DAG and measured self times.
+/// A validation record is always returned so the report can display accept/reject status with
+/// the underlying numbers that justified the decision.
 /// </summary>
 public static class CriticalPathAnalyzer
 {
-    public static (IReadOnlyList<ProjectTiming> Path, TimeSpan Total) Compute(
+    /// <summary>Tolerance for accepting a computed path whose total is slightly above wall clock (clock-skew slack).</summary>
+    private const int ValidationToleranceMs = 50;
+
+    public static (IReadOnlyList<ProjectTiming> Path, TimeSpan Total, CriticalPathValidation Validation) Compute(
         IReadOnlyList<ProjectTiming> projects,
         IReadOnlyDictionary<string, IReadOnlyList<string>> dependencies,
-        TimeSpan wallClockBuildTime)
+        TimeSpan wallClockBuildTime,
+        bool graphIsUsable)
     {
-        if (projects.Count == 0)
-            return ([], TimeSpan.Zero);
+        if (!graphIsUsable)
+        {
+            return ([], TimeSpan.Zero, new CriticalPathValidation
+            {
+                ComputedTotal = TimeSpan.Zero,
+                WallClock = wallClockBuildTime,
+                Accepted = false,
+                Reason = "Graph is not usable (too few edges for a multi-project solution). Critical path was not computed.",
+                GraphWasUsable = false,
+            });
+        }
 
-        // Lookup: project full path → ProjectTiming
+        if (projects.Count == 0)
+        {
+            return ([], TimeSpan.Zero, new CriticalPathValidation
+            {
+                ComputedTotal = TimeSpan.Zero,
+                WallClock = wallClockBuildTime,
+                Accepted = false,
+                Reason = "No projects to analyse.",
+                GraphWasUsable = true,
+            });
+        }
+
         var byPath = new Dictionary<string, ProjectTiming>(projects.Count, StringComparer.OrdinalIgnoreCase);
         foreach (var p in projects) byPath[p.FullPath] = p;
 
-        // Earliest finish and predecessor pointers via memoised DFS.
         var earliestFinish = new Dictionary<string, TimeSpan>(projects.Count, StringComparer.OrdinalIgnoreCase);
         var predecessor = new Dictionary<string, string?>(projects.Count, StringComparer.OrdinalIgnoreCase);
         var visiting = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -37,24 +57,37 @@ public static class CriticalPathAnalyzer
         foreach (var project in projects)
             Visit(project.FullPath);
 
-        // Pick the node with the largest earliest_finish — that's the end of the critical path.
         var endPath = earliestFinish
             .OrderByDescending(kv => kv.Value)
             .Select(kv => kv.Key)
             .FirstOrDefault();
 
+        var computedTotal = endPath is not null ? earliestFinish[endPath] : TimeSpan.Zero;
+
+        // Validation gate
+        var tolerance = TimeSpan.FromMilliseconds(ValidationToleranceMs);
+        var accepted = endPath is not null && computedTotal <= wallClockBuildTime + tolerance;
+        string reason;
         if (endPath is null)
-            return ([], TimeSpan.Zero);
+            reason = "No end node found.";
+        else if (!accepted)
+            reason = $"Computed path total ({FormatDuration(computedTotal)}) exceeds wall clock ({FormatDuration(wallClockBuildTime)}) beyond tolerance ({ValidationToleranceMs}ms). " +
+                     "The dependency model is likely incomplete or inconsistent. Path suppressed.";
+        else
+            reason = $"Computed path total {FormatDuration(computedTotal)} <= wall clock {FormatDuration(wallClockBuildTime)} (within {ValidationToleranceMs}ms tolerance).";
 
-        var computedTotal = earliestFinish[endPath];
+        var validation = new CriticalPathValidation
+        {
+            ComputedTotal = computedTotal,
+            WallClock = wallClockBuildTime,
+            Accepted = accepted,
+            Reason = reason,
+            GraphWasUsable = true,
+        };
 
-        // ── Validation gate ─────────────────────────────────────────────
-        // If the computed critical path is longer than wall-clock build time, our dependency
-        // model is incomplete or cyclic. Reject the result rather than ship misleading data.
-        if (computedTotal > wallClockBuildTime + TimeSpan.FromMilliseconds(50))
-            return ([], TimeSpan.Zero);
+        if (!accepted || endPath is null)
+            return ([], TimeSpan.Zero, validation);
 
-        // Walk predecessors back from the endpoint.
         var path = new List<ProjectTiming>();
         var cursor = endPath;
         while (cursor is not null && byPath.TryGetValue(cursor, out var node))
@@ -64,17 +97,13 @@ public static class CriticalPathAnalyzer
         }
         path.Reverse();
 
-        return (path, computedTotal);
+        return (path, computedTotal, validation);
 
         TimeSpan Visit(string path)
         {
             if (earliestFinish.TryGetValue(path, out var cached)) return cached;
             if (!byPath.TryGetValue(path, out var project)) return TimeSpan.Zero;
-            if (!visiting.Add(path))
-            {
-                // Cycle protection — should not happen for a real project DAG but guard anyway.
-                return TimeSpan.Zero;
-            }
+            if (!visiting.Add(path)) return TimeSpan.Zero;
 
             TimeSpan bestDepFinish = TimeSpan.Zero;
             string? bestDep = null;
@@ -98,4 +127,6 @@ public static class CriticalPathAnalyzer
             return finishTime;
         }
     }
+
+    private static string FormatDuration(TimeSpan ts) => Rendering.ConsoleReportRenderer.FormatDuration(ts);
 }

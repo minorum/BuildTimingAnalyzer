@@ -1,4 +1,5 @@
 using BuildTimeAnalyzer.Models;
+using BuildTimeAnalyzer.Services;
 
 namespace BuildTimeAnalyzer.Rendering;
 
@@ -21,14 +22,18 @@ public static class ConsoleReportRenderer
                 RenderDependencyHubs(report);
             }
 
-            if (report.Graph.Cycles.Count > 0)
-            {
-                Console.WriteLine();
-                RenderCycles(report);
-            }
+            Console.WriteLine();
+            RenderCycleStatus(report);
         }
 
-        // Critical path — hard rule: only render if non-empty (validation passed)
+        // Critical path validation status is always shown when the graph has content,
+        // so the reader understands why the section is or is not present
+        if (report.Graph.Nodes.Count > 0)
+        {
+            Console.WriteLine();
+            RenderCriticalPathValidation(report);
+        }
+
         if (report.CriticalPath.Count > 0)
         {
             Console.WriteLine();
@@ -53,6 +58,12 @@ public static class ConsoleReportRenderer
             RenderSpanOutliers(report);
         }
 
+        if (report.Projects.Count > 0)
+        {
+            Console.WriteLine();
+            RenderProjectCountTax(report);
+        }
+
         Console.WriteLine();
         RenderTimeline(report);
         Console.WriteLine();
@@ -60,7 +71,6 @@ public static class ConsoleReportRenderer
         Console.WriteLine();
         RenderTargetsTable(report);
 
-        // Demoted: only if something non-trivial is there
         var showCustom = report.PotentiallyCustomTargets.Any(t => t.SelfTime.TotalSeconds >= 1);
         if (showCustom)
         {
@@ -135,7 +145,7 @@ public static class ConsoleReportRenderer
         if (!report.Graph.IsUsable)
         {
             Console.WriteLine();
-            Console.WriteLine("  Note: graph has too few edges to be usable for critical path analysis.");
+            Console.WriteLine("  Note: graph has too few edges for derived analyses (critical path, etc.).");
             Console.WriteLine("  Check whether ProjectReference extraction captured your project references correctly.");
         }
     }
@@ -144,52 +154,83 @@ public static class ConsoleReportRenderer
 
     private static void RenderDependencyHubs(BuildReport report)
     {
-        Console.WriteLine("  Dependency Hubs (top by fan-in)");
+        Console.WriteLine("  Dependency Hubs");
+        Console.WriteLine("  (Sorted by transitive dependents — how much of the graph is downstream.");
+        Console.WriteLine("   High fan-in is a structural signal, not automatic proof of bottleneck status.)");
         Console.WriteLine();
 
         var nameWidth = Math.Max(7, report.Graph.TopHubs.Max(h => h.ProjectName.Length));
         nameWidth = Math.Min(nameWidth, 35);
 
-        Console.WriteLine($"  {"#",-4} {"Project".PadRight(nameWidth)}  {"Referenced by",14}  {"References",11}");
-        Console.WriteLine($"  {new string('-', 4)} {new string('-', nameWidth)}  {new string('-', 14)}  {new string('-', 11)}");
+        Console.WriteLine($"  {"#",-4} {"Project".PadRight(nameWidth)}  {"Direct Ref by",14}  {"Transitive Deps",16}  {"Direct Refs",12}");
+        Console.WriteLine($"  {new string('-', 4)} {new string('-', nameWidth)}  {new string('-', 14)}  {new string('-', 16)}  {new string('-', 12)}");
 
         int rank = 1;
         foreach (var h in report.Graph.TopHubs.Take(10))
         {
             var name = Truncate(h.ProjectName, nameWidth);
-            Console.WriteLine($"  {rank,-4} {name.PadRight(nameWidth)}  {h.IncomingCount,14}  {h.OutgoingCount,11}");
+            Console.WriteLine($"  {rank,-4} {name.PadRight(nameWidth)}  {h.IncomingCount,14}  {h.TransitiveDependentsCount,16}  {h.OutgoingCount,12}");
             rank++;
         }
     }
 
-    // ──────────────────────────── Cycles ────────────────────────────
+    // ──────────────────────────── Cycle Status ────────────────────────────
 
-    private static void RenderCycles(BuildReport report)
+    private static void RenderCycleStatus(BuildReport report)
     {
-        Console.WriteLine("  Dependency Cycles Detected");
+        Console.WriteLine("  Dependency Cycle Check");
         Console.WriteLine();
+        if (!report.Graph.CycleDetectionRan)
+        {
+            Console.WriteLine("  Cycle detection did not run.");
+            return;
+        }
+        if (report.Graph.Cycles.Count == 0)
+        {
+            Console.WriteLine("  No project-reference cycles detected.");
+            return;
+        }
+
+        Console.WriteLine($"  {report.Graph.Cycles.Count} cycle(s) detected:");
         foreach (var cycle in report.Graph.Cycles.Take(5))
-            Console.WriteLine($"  {string.Join(" -> ", cycle)} -> {cycle[0]}");
+            Console.WriteLine($"    {string.Join(" -> ", cycle)} -> {cycle[0]}");
+    }
+
+    // ──────────────────────────── Critical Path Validation ────────────────
+
+    private static void RenderCriticalPathValidation(BuildReport report)
+    {
+        var v = report.CriticalPathValidation;
+        Console.WriteLine("  Critical Path Validation");
+        Console.WriteLine();
+        Console.WriteLine($"  Graph usable      {(v.GraphWasUsable ? "yes" : "no")}");
+        Console.WriteLine($"  CPM total         {FormatDuration(v.ComputedTotal)}");
+        Console.WriteLine($"  Wall clock        {FormatDuration(v.WallClock)}");
+        Console.WriteLine($"  Accepted          {(v.Accepted ? "yes" : "no")}");
+        Console.WriteLine($"  Reason            {v.Reason}");
     }
 
     // ──────────────────────────── Critical Path ────────────────────────────
 
     private static void RenderCriticalPath(BuildReport report)
     {
-        Console.WriteLine("  Critical Path (estimate from observed DAG)");
+        Console.WriteLine("  Critical Path Estimate (model-based, not a scheduler trace)");
+        Console.WriteLine("  Derived from observed ProjectReference DAG + measured self times. Accuracy depends on");
+        Console.WriteLine("  whether dependency extraction and exclusive timing are capturing your build correctly.");
         Console.WriteLine();
 
         var nameWidth = Math.Max(7, report.CriticalPath.Max(p => p.Name.Length));
         nameWidth = Math.Min(nameWidth, 35);
 
-        Console.WriteLine($"  {"Step",-4} {"Project".PadRight(nameWidth)}  {"Self Time",10}  {"% Self",8}");
-        Console.WriteLine($"  {new string('-', 4)} {new string('-', nameWidth)}  {new string('-', 10)}  {new string('-', 8)}");
+        Console.WriteLine($"  {"Step",-4} {"Project".PadRight(nameWidth)}  {"Self Time",10}  {"% Self",8}  {"Kind",-20}");
+        Console.WriteLine($"  {new string('-', 4)} {new string('-', nameWidth)}  {new string('-', 10)}  {new string('-', 8)}  {new string('-', 20)}");
 
         int step = 1;
         foreach (var p in report.CriticalPath)
         {
             var name = Truncate(p.Name, nameWidth);
-            Console.WriteLine($"  {step,-4} {name.PadRight(nameWidth)}  {FormatDuration(p.SelfTime),10}  {p.SelfPercent,7:F1}%");
+            var kind = ProjectKindHeuristic.Label(p.KindHeuristic);
+            Console.WriteLine($"  {step,-4} {name.PadRight(nameWidth)}  {FormatDuration(p.SelfTime),10}  {p.SelfPercent,7:F1}%  {kind,-20}");
             step++;
         }
         Console.WriteLine();
@@ -247,24 +288,55 @@ public static class ConsoleReportRenderer
 
     private static void RenderSpanOutliers(BuildReport report)
     {
-        Console.WriteLine("  Span vs Self Outliers (projects waiting on the graph)");
+        Console.WriteLine("  Span vs Self Outliers");
         Console.WriteLine("  Rule: Span >= 5s, Span/SelfTime >= 5x, Span - SelfTime >= 3s");
+        Console.WriteLine("  The pattern has several possible causes (dependency waiting, SDK orchestration, reference");
+        Console.WriteLine("  work, static-web-assets, test/benchmark shape, incremental effects). Timing alone does not");
+        Console.WriteLine("  identify which — cross-reference with Dependency Hubs and category composition.");
         Console.WriteLine();
 
         var rows = report.SpanOutliers.ToList();
         var nameWidth = Math.Max(7, rows.Max(p => p.Name.Length));
         nameWidth = Math.Min(nameWidth, 35);
 
-        Console.WriteLine($"  {"#",-4} {"Project".PadRight(nameWidth)}  {"Span",10}  {"Self Time",10}  {"Ratio",8}");
-        Console.WriteLine($"  {new string('-', 4)} {new string('-', nameWidth)}  {new string('-', 10)}  {new string('-', 10)}  {new string('-', 8)}");
+        Console.WriteLine($"  {"#",-4} {"Project".PadRight(nameWidth)}  {"Span",10}  {"Self Time",10}  {"Ratio",8}  {"Kind",-20}");
+        Console.WriteLine($"  {new string('-', 4)} {new string('-', nameWidth)}  {new string('-', 10)}  {new string('-', 10)}  {new string('-', 8)}  {new string('-', 20)}");
 
         int rank = 1;
         foreach (var p in rows)
         {
             var ratio = p.SelfTime.TotalMilliseconds > 0 ? p.Span.TotalMilliseconds / p.SelfTime.TotalMilliseconds : 0;
             var name = Truncate(p.Name, nameWidth);
-            Console.WriteLine($"  {rank,-4} {name.PadRight(nameWidth)}  {FormatDuration(p.Span),10}  {FormatDuration(p.SelfTime),10}  {ratio,7:F1}x");
+            var kind = ProjectKindHeuristic.Label(p.KindHeuristic);
+            Console.WriteLine($"  {rank,-4} {name.PadRight(nameWidth)}  {FormatDuration(p.Span),10}  {FormatDuration(p.SelfTime),10}  {ratio,7:F1}x  {kind,-20}");
             rank++;
+        }
+    }
+
+    // ──────────────────────────── Project Count Tax ────────────────
+
+    private static void RenderProjectCountTax(BuildReport report)
+    {
+        var tax = report.ProjectCountTax;
+        Console.WriteLine("  Project Count Tax Indicators");
+        Console.WriteLine("  Candidate signals that the solution pays graph/orchestration cost disproportionate to");
+        Console.WriteLine("  local work. Each indicator is a pattern to investigate, not proof of a problem.");
+        Console.WriteLine();
+
+        Console.WriteLine($"  References > compile                     {tax.ReferencesExceedCompileCount} of {tax.TotalProjects}");
+        Console.WriteLine($"  References are the majority of self time {tax.ReferencesMajorityCount} of {tax.TotalProjects}");
+        Console.WriteLine($"  Tiny self / huge span (outlier rule)     {tax.TinySelfHugeSpanCount} of {tax.TotalProjects}");
+        Console.WriteLine();
+
+        Console.WriteLine("  Per-kind medians (name-based heuristic, not authoritative):");
+        Console.WriteLine();
+        Console.WriteLine($"  {"Kind",-22}  {"Count",6}  {"Median Self",12}  {"Median Span",12}  {"Median Span/Self",18}");
+        Console.WriteLine($"  {new string('-', 22)}  {new string('-', 6)}  {new string('-', 12)}  {new string('-', 12)}  {new string('-', 18)}");
+        foreach (var s in tax.PerKindStats)
+        {
+            var kindLabel = ProjectKindHeuristic.Label(s.Kind);
+            var ratioDisplay = s.MedianSpanToSelfRatio > 0 ? $"{s.MedianSpanToSelfRatio:F1}x" : "n/a";
+            Console.WriteLine($"  {kindLabel,-22}  {s.Count,6}  {FormatDuration(s.MedianSelfTime),12}  {FormatDuration(s.MedianSpan),12}  {ratioDisplay,18}");
         }
     }
 
@@ -276,7 +348,7 @@ public static class ConsoleReportRenderer
 
         var hasCritical = report.CriticalPath.Count > 0;
         var header = hasCritical
-            ? "  Build Timeline (wall-clock Span per project, * = on critical path)"
+            ? "  Build Timeline (wall-clock Span per project, * = on critical path estimate)"
             : "  Build Timeline (wall-clock Span per project)";
 
         Console.WriteLine(header);
@@ -374,6 +446,16 @@ public static class ConsoleReportRenderer
             Console.WriteLine($"  {rank,-4} {status}{name.PadRight(nameWidth - 1)}  {FormatDuration(p.SelfTime),10}  {FormatDuration(p.Span),10}  {p.SelfPercent,7:F1}%  {p.ErrorCount,4}  {p.WarningCount,4}");
             rank++;
 
+            if (p.CategoryBreakdown.Count > 0)
+            {
+                var composition = FormatCategoryComposition(p);
+                if (composition.Length > 0)
+                {
+                    var compLeader = "  composition:".PadRight(nameWidth + 1);
+                    Console.WriteLine($"       {compLeader} {composition}");
+                }
+            }
+
             if (p.Targets.Count > 0)
             {
                 foreach (var t in p.Targets)
@@ -384,6 +466,23 @@ public static class ConsoleReportRenderer
                 }
             }
         }
+    }
+
+    private static string FormatCategoryComposition(ProjectTiming p)
+    {
+        // Normalise against the sum of the breakdown, not p.SelfTime, so percentages always add to 100%.
+        // SelfTime and CategoryBreakdown use slightly different dedup strategies, and mixing them
+        // produces misleading sums.
+        var totalMs = p.CategoryBreakdown.Sum(kv => kv.Value.TotalMilliseconds);
+        if (totalMs <= 0) return "";
+
+        var parts = p.CategoryBreakdown
+            .Where(kv => kv.Value.TotalMilliseconds > 0)
+            .OrderByDescending(kv => kv.Value)
+            .Take(5)
+            .Select(kv => $"{CategoryLabel(kv.Key)} {kv.Value.TotalMilliseconds / totalMs * 100:F0}%");
+
+        return string.Join(", ", parts);
     }
 
     // ──────────────────────────── Targets ────────────────────────────
@@ -457,7 +556,10 @@ public static class ConsoleReportRenderer
         Console.WriteLine();
         WriteHeader("Analysis");
 
-        Console.WriteLine("  Key Findings");
+        Console.WriteLine("  Findings are structured as:");
+        Console.WriteLine("    Measured               — counted facts only");
+        Console.WriteLine("    Likely explanation     — heuristic hypothesis (when present, clearly tagged)");
+        Console.WriteLine("    Investigate            — concrete next step");
         Console.WriteLine();
 
         foreach (var f in analysis.Findings)
@@ -469,9 +571,12 @@ public static class ConsoleReportRenderer
                 _ => "INFO",
             };
             Console.WriteLine($"  {f.Number}. [{severity}] {f.Title}");
-            Console.WriteLine($"     {f.Detail}");
-            Console.WriteLine($"     Evidence: {f.Evidence}");
-            Console.WriteLine($"     Threshold: {f.ThresholdName}");
+            Console.WriteLine($"     Measured:     {f.Measured}");
+            if (!string.IsNullOrEmpty(f.LikelyExplanation))
+                Console.WriteLine($"     Likely:       {f.LikelyExplanation}");
+            Console.WriteLine($"     Investigate:  {f.InvestigationSuggestion}");
+            Console.WriteLine($"     Evidence:     {f.Evidence}");
+            Console.WriteLine($"     Threshold:    {f.ThresholdName}");
             Console.WriteLine();
         }
 

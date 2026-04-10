@@ -4,18 +4,21 @@ using BuildTimeAnalyzer.Rendering;
 namespace BuildTimeAnalyzer.Services;
 
 /// <summary>
-/// Evidence-driven analysis. Every finding cites a concrete metric and a named threshold
-/// constant. Recommendations are investigation targets only — never structural conclusions
-/// from timing data alone.
+/// Evidence-driven analysis. Every finding is split into strict layers:
+///   • Title / Measured       — purely factual, no interpretation
+///   • LikelyExplanation      — heuristic hypothesis (optional, clearly tagged)
+///   • InvestigationSuggestion — concrete next step
+///
+/// Recommendations are investigation targets only — never structural conclusions from timing data.
 /// </summary>
 public static class BuildAnalyzer
 {
     // ── Named thresholds ─────────────────────────────────────────────
 
-    private const double BottleneckCriticalPct = 25.0;
-    private const double BottleneckWarningPct = 15.0;
-    private const double DisproportionCriticalRatio = 2.5;
-    private const double DisproportionWarningRatio = 1.8;
+    private const double LargestShareCriticalPct = 25.0;
+    private const double LargestShareWarningPct = 15.0;
+    private const double LargestGapCriticalRatio = 2.5;
+    private const double LargestGapWarningRatio = 1.8;
 
     private const double OutlierTargetMedianMultiplier = 4.0;
     private const double OutlierTargetMinSeconds = 2.0;
@@ -27,12 +30,10 @@ public static class BuildAnalyzer
 
     private const double CriticalPathMinInterestingPct = 30.0;
 
-    // Reference overhead — strict "systemic, not isolated" thresholds
     private const double ReferenceSelfPctMin = 10.0;
     private const double PayingProjectsPctMin = 50.0;
     private const double MedianReferencePerPayingProjectMinMs = 250.0;
 
-    // Span-vs-self waiting pattern — fire when multiple projects match the outlier rule
     private const int SpanOutliersMinCountForFinding = 3;
 
     public static BuildAnalysis Analyze(BuildReport report)
@@ -41,15 +42,14 @@ public static class BuildAnalyzer
             return new BuildAnalysis { Findings = [], Recommendations = [] };
 
         var findings = new List<AnalysisFinding>();
-
         var totalSelfMs = report.Projects.Sum(p => p.SelfTime.TotalMilliseconds);
 
-        DetectBottleneckProject(report, findings);
-        DetectDisproportionateProject(report, findings);
+        DetectLargestShare(report, findings);
+        DetectLargestGap(report, findings);
         DetectOutlierTargets(report, findings);
         DetectCostlyResolvePackageAssets(report, findings);
         DetectWarningConcentration(report, findings);
-        DetectSystemicReferenceOverhead(report, findings);
+        DetectBroadReferenceOverhead(report, findings);
         DetectSpanWaitingPattern(report, findings);
         DetectCriticalPathConcentration(report, totalSelfMs, findings);
 
@@ -58,47 +58,40 @@ public static class BuildAnalyzer
 
         var recommendations = GenerateRecommendations(findings, report);
 
-        return new BuildAnalysis
-        {
-            Findings = findings,
-            Recommendations = recommendations,
-        };
+        return new BuildAnalysis { Findings = findings, Recommendations = recommendations };
     }
 
     // ──────────────────────────── Findings ────────────────────────────
 
-    private static void DetectBottleneckProject(BuildReport report, List<AnalysisFinding> findings)
+    private static void DetectLargestShare(BuildReport report, List<AnalysisFinding> findings)
     {
         if (report.Projects.Count < 2) return;
 
         var top = report.Projects[0];
-        if (top.SelfPercent <= BottleneckWarningPct) return;
+        if (top.SelfPercent <= LargestShareWarningPct) return;
 
-        var isCritical = top.SelfPercent > BottleneckCriticalPct;
+        var isCritical = top.SelfPercent > LargestShareCriticalPct;
         var severity = isCritical ? FindingSeverity.Critical : FindingSeverity.Warning;
-        var thresholdName = isCritical ? nameof(BottleneckCriticalPct) : nameof(BottleneckWarningPct);
-        var thresholdValue = isCritical ? BottleneckCriticalPct : BottleneckWarningPct;
+        var thresholdName = isCritical ? nameof(LargestShareCriticalPct) : nameof(LargestShareWarningPct);
+        var thresholdValue = isCritical ? LargestShareCriticalPct : LargestShareWarningPct;
 
-        var topTargetsForProject = top.Targets.Count > 0
-            ? top.Targets.Take(2).ToList()
-            : report.TopTargets.Where(t => t.ProjectName == top.Name).Take(2).ToList();
-
-        var targetDetails = topTargetsForProject.Count > 0
-            ? " Top targets: " + string.Join(", ", topTargetsForProject.Select(t => $"{t.Name} ({Fmt(t.SelfTime)}, {CategoryLabel(t.Category)})")) + "."
-            : "";
+        var topTargets = top.Targets.Take(2).Select(t => $"{t.Name} ({Fmt(t.SelfTime)}, {CategoryLabel(t.Category)})").ToList();
+        var targetPhrase = topTargets.Count > 0 ? $" Top targets: {string.Join(", ", topTargets)}." : "";
 
         findings.Add(new AnalysisFinding
         {
             Number = 0,
-            Title = $"{top.Name} holds the largest share of self time",
-            Detail = $"It accounts for {top.SelfPercent:F1}% of total self time ({Fmt(top.SelfTime)}).{targetDetails} Investigate its top targets to understand where the time is going.",
+            Title = $"Largest self-time share: {top.Name}",
             Severity = severity,
+            Measured = $"{top.Name} accounts for {top.SelfPercent:F1}% of total self time ({Fmt(top.SelfTime)}).{targetPhrase}",
+            LikelyExplanation = null,
+            InvestigationSuggestion = $"Profile {top.Name}'s top targets before deciding whether anything needs to change.",
             Evidence = $"SelfPercent={top.SelfPercent:F1}%, SelfTime={Fmt(top.SelfTime)}",
             ThresholdName = $"{thresholdName}={thresholdValue:F0}%",
         });
     }
 
-    private static void DetectDisproportionateProject(BuildReport report, List<AnalysisFinding> findings)
+    private static void DetectLargestGap(BuildReport report, List<AnalysisFinding> findings)
     {
         if (report.Projects.Count < 2) return;
 
@@ -108,20 +101,22 @@ public static class BuildAnalyzer
         if (second.SelfTime.TotalMilliseconds <= 0) return;
         var ratio = first.SelfTime.TotalMilliseconds / second.SelfTime.TotalMilliseconds;
 
-        if (ratio < DisproportionWarningRatio) return;
+        if (ratio < LargestGapWarningRatio) return;
 
-        var isCritical = ratio >= DisproportionCriticalRatio;
+        var isCritical = ratio >= LargestGapCriticalRatio;
         var severity = isCritical ? FindingSeverity.Critical : FindingSeverity.Warning;
-        var thresholdName = isCritical ? nameof(DisproportionCriticalRatio) : nameof(DisproportionWarningRatio);
-        var thresholdValue = isCritical ? DisproportionCriticalRatio : DisproportionWarningRatio;
+        var thresholdName = isCritical ? nameof(LargestGapCriticalRatio) : nameof(LargestGapWarningRatio);
+        var thresholdValue = isCritical ? LargestGapCriticalRatio : LargestGapWarningRatio;
 
         findings.Add(new AnalysisFinding
         {
             Number = 0,
-            Title = $"{first.Name} self time is {ratio:F1}x the next project",
-            Detail = $"{first.Name} has {Fmt(first.SelfTime)} of self time versus {second.Name} at {Fmt(second.SelfTime)}. Investigate what targets are driving this — the gap is wide enough to be worth explaining.",
+            Title = $"Largest self-time gap to next project: {first.Name}",
             Severity = severity,
-            Evidence = $"Ratio={ratio:F2}, First.SelfTime={Fmt(first.SelfTime)}, Second.SelfTime={Fmt(second.SelfTime)}",
+            Measured = $"{first.Name} has {Fmt(first.SelfTime)} of self time; the next project ({second.Name}) has {Fmt(second.SelfTime)}. Ratio: {ratio:F1}x.",
+            LikelyExplanation = null,
+            InvestigationSuggestion = $"Review {first.Name}'s target breakdown to understand what is driving the gap.",
+            Evidence = $"Ratio={ratio:F2}, First={Fmt(first.SelfTime)}, Second={Fmt(second.SelfTime)}",
             ThresholdName = $"{thresholdName}={thresholdValue:F1}x",
         });
     }
@@ -139,7 +134,6 @@ public static class BuildAnalyzer
         {
             var sorted = group.OrderBy(t => t.SelfTime).ToList();
             var median = sorted[sorted.Count / 2].SelfTime;
-
             if (median.TotalMilliseconds <= 0) continue;
 
             foreach (var outlier in sorted.Where(t =>
@@ -151,9 +145,11 @@ public static class BuildAnalyzer
                 findings.Add(new AnalysisFinding
                 {
                     Number = 0,
-                    Title = $"{outlier.Name} in {outlier.ProjectName} is an outlier",
-                    Detail = $"The median {outlier.Name} self time across projects is {Fmt(median)}, but {outlier.ProjectName} runs at {Fmt(outlier.SelfTime)} ({multiplier:F1}x median). Investigate why this project's {outlier.Name} behaves differently.",
+                    Title = $"Target outlier: {outlier.Name} in {outlier.ProjectName}",
                     Severity = FindingSeverity.Warning,
+                    Measured = $"Median {outlier.Name} self time is {Fmt(median)}; {outlier.ProjectName} runs at {Fmt(outlier.SelfTime)} ({multiplier:F1}x median).",
+                    LikelyExplanation = "A target running much slower than its median across projects often reflects different inputs — source generators, analyzers, or file volume specific to that project. The multiplier alone does not identify which.",
+                    InvestigationSuggestion = $"Compare {outlier.ProjectName} against projects with similar {outlier.Name} runtime to find what differs.",
                     Evidence = $"SelfTime={Fmt(outlier.SelfTime)}, Median={Fmt(median)}, Multiplier={multiplier:F2}x",
                     ThresholdName = $"{nameof(OutlierTargetMedianMultiplier)}={OutlierTargetMedianMultiplier:F0}x",
                 });
@@ -164,21 +160,21 @@ public static class BuildAnalyzer
     private static void DetectCostlyResolvePackageAssets(BuildReport report, List<AnalysisFinding> findings)
     {
         var costly = report.TopTargets
-            .Where(t => t.Name == "ResolvePackageAssets" &&
-                        t.SelfTime.TotalSeconds > CostlyResolvePackageAssetsSeconds)
+            .Where(t => t.Name == "ResolvePackageAssets" && t.SelfTime.TotalSeconds > CostlyResolvePackageAssetsSeconds)
             .OrderByDescending(t => t.SelfTime)
             .ToList();
 
         if (costly.Count == 0) return;
-
         var max = costly[0];
 
         findings.Add(new AnalysisFinding
         {
             Number = 0,
-            Title = $"ResolvePackageAssets is expensive in {costly.Count} project(s)",
-            Detail = $"Slowest: {max.ProjectName} at {Fmt(max.SelfTime)}. This target resolves NuGet package assets and is typically proportional to the transitive dependency graph size. Investigate by running `dotnet nuget why` on heavy packages.",
+            Title = $"Expensive ResolvePackageAssets: {costly.Count} project(s)",
             Severity = FindingSeverity.Warning,
+            Measured = $"{costly.Count} project(s) cross the {CostlyResolvePackageAssetsSeconds:F0}s threshold. Slowest: {max.ProjectName} at {Fmt(max.SelfTime)}.",
+            LikelyExplanation = "ResolvePackageAssets cost typically scales with the transitive NuGet graph size, but this is a correlation — not proof. High cost does not directly identify which packages are responsible.",
+            InvestigationSuggestion = "Run `dotnet nuget why` on heavy packages in the affected projects to locate transitive chains.",
             Evidence = $"Max.SelfTime={Fmt(max.SelfTime)}, Count={costly.Count}",
             ThresholdName = $"{nameof(CostlyResolvePackageAssetsSeconds)}={CostlyResolvePackageAssetsSeconds:F0}s",
         });
@@ -196,9 +192,7 @@ public static class BuildAnalyzer
         if (projectsWithWarnings.Count == 0) return;
 
         var concentrationRatio = (double)projectsWithWarnings.Count / Math.Max(1, report.Projects.Count);
-        var isConcentrated = concentrationRatio <= WarningConcentrationRatio;
-
-        if (!isConcentrated) return;
+        if (concentrationRatio > WarningConcentrationRatio) return;
 
         var attributedTotal = projectsWithWarnings.Sum(p => p.WarningCount);
         var topN = Math.Min(5, projectsWithWarnings.Count);
@@ -208,29 +202,26 @@ public static class BuildAnalyzer
         var topList = string.Join(", ",
             projectsWithWarnings.Take(topN).Select(p => $"{p.Name} ({p.WarningCount})"));
 
-        // Finding explicitly labels its scope as "attributed" — does not imply the full warning total
-        var detail = $"Top {topN} attributed sources: {topList}. Other attributed projects: {remainingAttributed}. " +
-                     $"Total attributed: {attributedTotal} of {report.WarningCount} warnings " +
-                     $"({report.UnattributedWarningCount} could not be attributed to a specific project). " +
-                     $"Concentrated attributed warnings are easier to fix than scattered ones — investigate the top sources.";
-
         findings.Add(new AnalysisFinding
         {
             Number = 0,
             Title = $"Attributed warnings are concentrated in {projectsWithWarnings.Count} of {report.Projects.Count} projects",
-            Detail = detail,
             Severity = FindingSeverity.Info,
+            Measured = $"Of {report.WarningCount} total warnings, {report.AttributedWarningCount} are attributed to a specific project. " +
+                       $"Top {topN} attributed sources: {topList}. Other attributed projects: {remainingAttributed}. " +
+                       $"Unattributed: {report.UnattributedWarningCount}.",
+            LikelyExplanation = null,
+            InvestigationSuggestion = "Fix the top sources first — concentrated attributed warnings are easier to clean up than scattered ones.",
             Evidence = $"ProjectsWithWarnings={projectsWithWarnings.Count}, TotalProjects={report.Projects.Count}, ConcentrationRatio={concentrationRatio:F2}",
             ThresholdName = $"{nameof(WarningConcentrationRatio)}={WarningConcentrationRatio:F2}",
         });
     }
 
-    private static void DetectSystemicReferenceOverhead(BuildReport report, List<AnalysisFinding> findings)
+    private static void DetectBroadReferenceOverhead(BuildReport report, List<AnalysisFinding> findings)
     {
         var overhead = report.ReferenceOverhead;
         if (overhead is null) return;
 
-        // Strict "systemic, not isolated" — all three thresholds must hold
         if (overhead.SelfPercent < ReferenceSelfPctMin) return;
         if (overhead.PayingProjectsPercent < PayingProjectsPctMin) return;
         if (overhead.MedianPerPayingProject.TotalMilliseconds < MedianReferencePerPayingProjectMinMs) return;
@@ -238,13 +229,15 @@ public static class BuildAnalyzer
         findings.Add(new AnalysisFinding
         {
             Number = 0,
-            Title = "Reference-related build work appears to be systemic, not isolated",
-            Detail = $"Reference-category targets (ResolveAssemblyReferences, ProcessFrameworkReferences, _HandlePackageFileConflicts, etc.) account for "
-                   + $"{overhead.SelfPercent:F1}% of total self time ({Fmt(overhead.TotalSelfTime)}) across "
-                   + $"{overhead.PayingProjectsCount} of {overhead.TotalProjectsCount} projects "
-                   + $"(median {Fmt(overhead.MedianPerPayingProject)} per paying project). "
-                   + "Investigate whether the solution's project count and dependency graph are causing repeated reference-resolution overhead across many small projects.",
+            Title = "Reference-related build work is broadly distributed",
             Severity = FindingSeverity.Warning,
+            Measured = $"Reference-category targets (ResolveAssemblyReferences, ProcessFrameworkReferences, _HandlePackageFileConflicts, etc.) " +
+                       $"account for {overhead.SelfPercent:F1}% of total self time ({Fmt(overhead.TotalSelfTime)}), " +
+                       $"paid by {overhead.PayingProjectsCount} of {overhead.TotalProjectsCount} projects " +
+                       $"(median {Fmt(overhead.MedianPerPayingProject)} per paying project).",
+            LikelyExplanation = "Reference work spread across most projects can be a sign of fragmented dependency graphs — many small projects each paying a base reference-resolution cost. " +
+                                "It could also reflect unusual target customisation or a dependency-heavy codebase. The distribution alone does not identify which.",
+            InvestigationSuggestion = "Cross-reference this with the Dependency Hubs, per-project category composition, and Project Count Tax sections before concluding the solution shape is the cause.",
             Evidence = $"ReferenceSelfPct={overhead.SelfPercent:F1}%, PayingProjectsPct={overhead.PayingProjectsPercent:F0}%, MedianPerPaying={Fmt(overhead.MedianPerPayingProject)}",
             ThresholdName = $"{nameof(ReferenceSelfPctMin)}={ReferenceSelfPctMin:F0}%, {nameof(PayingProjectsPctMin)}={PayingProjectsPctMin:F0}%, {nameof(MedianReferencePerPayingProjectMinMs)}={MedianReferencePerPayingProjectMinMs:F0}ms",
         });
@@ -260,42 +253,48 @@ public static class BuildAnalyzer
         findings.Add(new AnalysisFinding
         {
             Number = 0,
-            Title = $"{report.SpanOutliers.Count} project(s) have long span relative to low self time",
-            Detail = $"These projects spent most of their wall-clock span waiting rather than doing local work: {examples}. "
-                   + "That pattern suggests waiting on dependencies, graph scheduling, or repeated framework/reference work rather than heavy project-local execution. "
-                   + "Investigate solution topology and dependency fan-out.",
+            Title = $"{report.SpanOutliers.Count} project(s) have span >> self time",
             Severity = FindingSeverity.Warning,
-            Evidence = $"OutlierCount={report.SpanOutliers.Count}, Rules: Span>=5s, Span/SelfTime>=5x, Span-SelfTime>=3s",
+            Measured = $"{report.SpanOutliers.Count} project(s) match the outlier rule (Span ≥ 5s, Span/SelfTime ≥ 5x, Span − SelfTime ≥ 3s). Examples: {examples}.",
+            LikelyExplanation = "This pattern has several possible causes and the report cannot distinguish between them from timing alone: " +
+                                "dependency waiting, SDK target orchestration, framework/reference work, static-web-assets pipelines, test/benchmark-specific build shape, or incremental-build effects.",
+            InvestigationSuggestion = "Cross-reference the listed projects with the Dependency Hubs section and the per-project category composition to narrow down the cause.",
+            Evidence = $"OutlierCount={report.SpanOutliers.Count}",
             ThresholdName = $"{nameof(SpanOutliersMinCountForFinding)}={SpanOutliersMinCountForFinding}",
         });
     }
 
     private static void DetectCriticalPathConcentration(BuildReport report, double totalSelfMs, List<AnalysisFinding> findings)
     {
-        // Hard rule: no critical path findings if validation failed (empty path).
         if (report.CriticalPath.Count == 0 || totalSelfMs <= 0) return;
 
         var cpSelfMs = report.CriticalPath.Sum(p => p.SelfTime.TotalMilliseconds);
         var cpPct = cpSelfMs / totalSelfMs * 100;
-
         if (cpPct < CriticalPathMinInterestingPct) return;
 
         var topThree = string.Join(" → ",
             report.CriticalPath.OrderByDescending(p => p.SelfTime).Take(3).Select(p => $"{p.Name} ({Fmt(p.SelfTime)})"));
 
+        var testBenchmarkCount = report.CriticalPath.Count(p =>
+            p.KindHeuristic == ProjectKind.Test || p.KindHeuristic == ProjectKind.Benchmark);
+        var testBenchmarkNote = testBenchmarkCount > 0
+            ? $" Note: {testBenchmarkCount} project(s) on the path are classified as test/benchmark by name-based heuristic — weight accordingly if they are not part of your primary optimization target."
+            : "";
+
         findings.Add(new AnalysisFinding
         {
             Number = 0,
-            Title = $"Critical path concentrates {cpPct:F1}% of total self time",
-            Detail = $"{report.CriticalPath.Count} projects on the critical path ({Fmt(report.CriticalPathTotal)} total). Highest-cost nodes: {topThree}. Investigate these first — they determine the lower bound on build time assuming the observed dependency graph.",
+            Title = $"Critical path estimate carries {cpPct:F1}% of total self time",
             Severity = FindingSeverity.Info,
+            Measured = $"The CPM estimate contains {report.CriticalPath.Count} projects totalling {Fmt(report.CriticalPathTotal)}. Highest-cost nodes: {topThree}.{testBenchmarkNote}",
+            LikelyExplanation = "The critical path is derived from the observed project-reference DAG and measured self times. It is a model estimate — not a scheduler trace — and is only as accurate as the extracted dependencies and exclusive timing model.",
+            InvestigationSuggestion = "Treat the path as a candidate list for sequential-ordering investigation. Verify that the dependency extraction looks right (graph health section) before using it to prioritise work.",
             Evidence = $"CriticalPathTotal={Fmt(report.CriticalPathTotal)}, CriticalPathPct={cpPct:F1}%, NodeCount={report.CriticalPath.Count}",
             ThresholdName = $"{nameof(CriticalPathMinInterestingPct)}={CriticalPathMinInterestingPct:F0}%",
         });
     }
 
     // ──────────────────────── Recommendations ──────────────────────
-    // Hard rule: investigation-first language. No architectural conclusions from timing data alone.
 
     private static IReadOnlyList<AnalysisRecommendation> GenerateRecommendations(
         List<AnalysisFinding> findings, BuildReport report)
@@ -306,7 +305,7 @@ public static class BuildAnalyzer
         {
             if (f.Severity == FindingSeverity.Info) continue;
 
-            if (f.Title.Contains("holds the largest share"))
+            if (f.Title.StartsWith("Largest self-time share"))
             {
                 var top = report.Projects.FirstOrDefault();
                 if (top is null) continue;
@@ -316,17 +315,17 @@ public static class BuildAnalyzer
                 recs.Add(new AnalysisRecommendation
                 {
                     Number = 0,
-                    Text = $"Investigate {top.Name}: start with {topTargets}. Profile the targets holding most of the {Fmt(top.SelfTime)} of self time before deciding whether to change anything.",
+                    Text = $"Investigate {top.Name}: start with {topTargets}. Profile the targets holding most of the {Fmt(top.SelfTime)} of self time before deciding whether anything needs to change.",
                 });
             }
-            else if (f.Title.Contains("self time is") && f.Title.Contains("the next project"))
+            else if (f.Title.StartsWith("Largest self-time gap"))
             {
                 var top = report.Projects.FirstOrDefault();
                 if (top is null) continue;
                 recs.Add(new AnalysisRecommendation
                 {
                     Number = 0,
-                    Text = $"Investigate why {top.Name}'s self time is disproportionate to the rest of the solution. Focus on its target breakdown before concluding the project needs structural changes.",
+                    Text = $"Investigate {top.Name}'s target breakdown to understand the gap. Do not conclude structural changes are needed from timing data alone.",
                 });
             }
             else if (f.Title.Contains("ResolvePackageAssets"))
@@ -337,28 +336,28 @@ public static class BuildAnalyzer
                     Text = "Investigate NuGet dependency graphs for the affected projects. Run `dotnet nuget why` on heavy packages before changing references.",
                 });
             }
-            else if (f.Title.Contains("is an outlier"))
+            else if (f.Title.StartsWith("Target outlier"))
             {
                 recs.Add(new AnalysisRecommendation
                 {
                     Number = 0,
-                    Text = $"Investigate: {f.Title}. Compare against projects with similar target to find what differs (source generators, custom analyzers, file volume).",
+                    Text = $"Investigate: {f.Title}. Compare against projects with similar target runtime to find what differs (source generators, analyzers, file volume).",
                 });
             }
-            else if (f.Title.Contains("Reference-related build work"))
+            else if (f.Title.StartsWith("Reference-related build work"))
             {
                 recs.Add(new AnalysisRecommendation
                 {
                     Number = 0,
-                    Text = "Investigate solution topology: check whether fan-out and project count are causing repeated reference-resolution across many small projects. Review the dependency graph section before restructuring.",
+                    Text = "Investigate the dependency hubs, per-project category composition, and the Project Count Tax section together before concluding the solution shape is responsible.",
                 });
             }
-            else if (f.Title.Contains("long span relative to low self time"))
+            else if (f.Title.Contains("span >> self time"))
             {
                 recs.Add(new AnalysisRecommendation
                 {
                     Number = 0,
-                    Text = "Investigate the dependency graph for the span-outlier projects. Look at their position in the DAG — they are likely waiting on upstream dependencies rather than doing heavy local work.",
+                    Text = "Cross-reference the span outliers with the Dependency Hubs and per-project category composition. The pattern has several possible causes and needs the graph context to narrow down.",
                 });
             }
         }
@@ -368,8 +367,6 @@ public static class BuildAnalyzer
 
         return recs;
     }
-
-    // ──────────────────────────── Helpers ───────────────────────────
 
     private static string Fmt(TimeSpan ts) => ConsoleReportRenderer.FormatDuration(ts);
 

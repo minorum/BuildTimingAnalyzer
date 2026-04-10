@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.0.9
+
+Evidence/interpretation separation release. The report now keeps measured facts,
+heuristic explanations, and investigation suggestions in strictly separate layers, adds
+several new solution-shape insight sections, and tones down every finding that previously
+snuck interpretation into the measured bucket.
+
+### Finding structure refactor
+- `AnalysisFinding` split into `Measured`, `LikelyExplanation` (optional), and `InvestigationSuggestion`
+- Console and HTML renderers show the three layers distinctly
+- Titles made factual: "holds the largest share" → "Largest self-time share: X"
+- "self time is Xx the next project" → "Largest self-time gap to next project: X"
+- "is an outlier" → "Target outlier: X in Y"
+- "broadly distributed" (was "systemic") — the hypothesis moved to `LikelyExplanation`
+- Every existing finding audited to prevent interpretation leaking into `Measured`
+
+### Transitive graph metrics
+- `ProjectGraphNode` now includes `TransitiveDependentsCount` and `TransitiveDependenciesCount`
+- Hubs table sorted by transitive dependents (downstream subtree size), not immediate fan-in
+- Softened description: high fan-in is a structural signal, not automatic bottleneck status
+
+### Cycle status always shown
+- "No project-reference cycles detected" when empty — never silent
+- Dedicated section with explicit detection status
+
+### Critical path validation status
+- New **Critical Path Validation** section: shows CPM total, wall clock, accept/reject, and reason
+- Rendered whenever the graph has content, independent of whether the path itself is rendered
+- Section title softened: "Critical Path Estimate (model-based, not a scheduler trace)"
+- Findings describe it as "an estimate" with explicit caveats about DAG accuracy
+
+### Per-project category composition
+- Top projects and critical-path projects get an inline composition row in the projects table:
+  `composition: compile 42%, references 28%, restore 18%, copy 12%`
+- Normalised so percentages always sum to 100%
+
+### Project Count Tax section
+- New section with concrete indicators:
+  - Projects where references &gt; compile
+  - Projects where references are the **majority** of self time (&gt; 50%)
+  - Projects matching the span-outlier rule
+- Per-kind median self time, median span, and median span/self ratio
+- Kinds come from name-based heuristic detection (explicitly labelled as heuristic)
+
+### Project kind heuristic
+- New `ProjectKind` enum: `Test`, `Benchmark`, `Other`
+- Used in span outliers, critical path, and project-count-tax sections
+- **Always labelled "heuristic"** in the UI — never presented as authoritative
+- Critical path finding notes when the path runs through test/benchmark projects so the reader can weight them
+
+### Language softening across sections
+- Hubs description: "high fan-in is a structural signal, not automatic proof of bottleneck status"
+- Span-outlier note lists possible causes explicitly (dependency waiting, SDK orchestration, reference work, static-web-assets, test/benchmark shape, incremental effects) instead of asserting one
+- Reference overhead finding framed as "broadly distributed", with the project-count hypothesis explicitly tagged as `LikelyExplanation`
+- Critical path recommendations: "candidate list for sequential-ordering investigation" instead of "they determine the lower bound on build time"
+
+### Warning reconciliation strengthened
+- Warning finding explicitly distinguishes "top attributed sources" from total attributed and unattributed
+
 ## 0.0.8
 
 Graph-level insights release. The report now surfaces solution-shape cost, not just local

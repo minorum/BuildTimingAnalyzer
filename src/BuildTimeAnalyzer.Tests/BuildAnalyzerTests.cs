@@ -33,9 +33,11 @@ public sealed class BuildAnalyzerTests
             PotentiallyCustomTargets = [],
             ReferenceOverhead = null,
             SpanOutliers = [],
+            ProjectCountTax = TestDefaults.EmptyTax((projects ?? []).Count),
             Graph = TestDefaults.EmptyGraph((projects ?? []).Count),
             CriticalPath = criticalPath ?? [],
             CriticalPathTotal = criticalPathTotal ?? TimeSpan.Zero,
+            CriticalPathValidation = TestDefaults.EmptyValidation(),
         };
     }
 
@@ -84,7 +86,7 @@ public sealed class BuildAnalyzerTests
         var report = CreateReport(projects: projects);
         var result = BuildAnalyzer.Analyze(report);
 
-        await Assert.That(result.Findings.Any(f => f.Title.Contains("largest share"))).IsFalse();
+        await Assert.That(result.Findings.Any(f => f.Title.Contains("Largest self-time share"))).IsFalse();
     }
 
     [Test]
@@ -98,7 +100,7 @@ public sealed class BuildAnalyzerTests
         var report = CreateReport(projects: projects);
         var result = BuildAnalyzer.Analyze(report);
 
-        var finding = result.Findings.FirstOrDefault(f => f.Title.Contains("largest share"));
+        var finding = result.Findings.FirstOrDefault(f => f.Title.Contains("Largest self-time share"));
         await Assert.That(finding).IsNotNull();
         await Assert.That(finding!.Severity).IsEqualTo(FindingSeverity.Critical);
         await Assert.That(finding.Title).Contains("BigProject");
@@ -115,7 +117,7 @@ public sealed class BuildAnalyzerTests
         var report = CreateReport(projects: projects);
         var result = BuildAnalyzer.Analyze(report);
 
-        var finding = result.Findings.FirstOrDefault(f => f.Title.Contains("largest share"));
+        var finding = result.Findings.FirstOrDefault(f => f.Title.Contains("Largest self-time share"));
         await Assert.That(finding).IsNotNull();
         await Assert.That(finding!.Severity).IsEqualTo(FindingSeverity.Warning);
     }
@@ -133,11 +135,11 @@ public sealed class BuildAnalyzerTests
         var report = CreateReport(projects: projects);
         var result = BuildAnalyzer.Analyze(report);
 
-        var finding = result.Findings.First(f => f.Title.Contains("largest share"));
+        var finding = result.Findings.First(f => f.Title.Contains("Largest self-time share"));
         await Assert.That(finding.Evidence).IsNotNull();
         await Assert.That(finding.Evidence.Length).IsGreaterThan(0);
         await Assert.That(finding.ThresholdName).IsNotNull();
-        await Assert.That(finding.ThresholdName).Contains("BottleneckCriticalPct");
+        await Assert.That(finding.ThresholdName).Contains("LargestShareCriticalPct");
     }
 
     // ────────────────────────── Disproportion ──────────────────────
@@ -153,7 +155,7 @@ public sealed class BuildAnalyzerTests
         var report = CreateReport(projects: projects);
         var result = BuildAnalyzer.Analyze(report);
 
-        var finding = result.Findings.FirstOrDefault(f => f.Title.Contains("the next project"));
+        var finding = result.Findings.FirstOrDefault(f => f.Title.Contains("Largest self-time gap"));
         await Assert.That(finding).IsNotNull();
         await Assert.That(finding!.Title).Contains("Slow");
     }
@@ -169,7 +171,7 @@ public sealed class BuildAnalyzerTests
         var report = CreateReport(projects: projects);
         var result = BuildAnalyzer.Analyze(report);
 
-        await Assert.That(result.Findings.Any(f => f.Title.Contains("the next project"))).IsFalse();
+        await Assert.That(result.Findings.Any(f => f.Title.Contains("Largest self-time gap"))).IsFalse();
     }
 
     // ────────────────────────── Outlier targets ─────────────────────
@@ -187,7 +189,7 @@ public sealed class BuildAnalyzerTests
         var report = CreateReport(targets: targets);
         var result = BuildAnalyzer.Analyze(report);
 
-        var finding = result.Findings.FirstOrDefault(f => f.Title.Contains("is an outlier"));
+        var finding = result.Findings.FirstOrDefault(f => f.Title.Contains("Target outlier"));
         await Assert.That(finding).IsNotNull();
         await Assert.That(finding!.Title).Contains("Outlier");
     }
@@ -406,7 +408,7 @@ public sealed class BuildAnalyzerTests
         var report = CreateReport(projects: outliers) with { SpanOutliers = outliers };
 
         var result = BuildAnalyzer.Analyze(report);
-        var finding = result.Findings.FirstOrDefault(f => f.Title.Contains("long span relative"));
+        var finding = result.Findings.FirstOrDefault(f => f.Title.Contains("span >> self time"));
         await Assert.That(finding).IsNotNull();
     }
 
@@ -420,7 +422,7 @@ public sealed class BuildAnalyzerTests
         var report = CreateReport(projects: outliers) with { SpanOutliers = outliers };
 
         var result = BuildAnalyzer.Analyze(report);
-        await Assert.That(result.Findings.Any(f => f.Title.Contains("long span"))).IsFalse();
+        await Assert.That(result.Findings.Any(f => f.Title.Contains("span >> self time"))).IsFalse();
     }
 
     // ──────────────────────── Warning wording ────────────────────
@@ -442,7 +444,7 @@ public sealed class BuildAnalyzerTests
         var result = BuildAnalyzer.Analyze(report);
         var finding = result.Findings.FirstOrDefault(f => f.Title.Contains("Attributed warnings"));
         await Assert.That(finding).IsNotNull();
-        await Assert.That(finding!.Detail).Contains("attributed");
-        await Assert.That(finding.Detail).Contains("5 could not be attributed");
+        await Assert.That(finding!.Measured).Contains("attributed");
+        await Assert.That(finding.Measured).Contains("Unattributed: 5");
     }
 }

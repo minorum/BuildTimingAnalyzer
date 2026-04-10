@@ -19,6 +19,25 @@ internal static class TestDefaults
         TopHubs = [],
         LongestChainProjectCount = totalProjects > 0 ? 1 : 0,
         Cycles = [],
+        CycleDetectionRan = true,
         IsUsable = totalProjects <= 1,
+    };
+
+    public static ProjectCountTaxStats EmptyTax(int totalProjects = 0) => new()
+    {
+        ReferencesExceedCompileCount = 0,
+        ReferencesMajorityCount = 0,
+        TinySelfHugeSpanCount = 0,
+        TotalProjects = totalProjects,
+        PerKindStats = [],
+    };
+
+    public static CriticalPathValidation EmptyValidation() => new()
+    {
+        ComputedTotal = TimeSpan.Zero,
+        WallClock = TimeSpan.Zero,
+        Accepted = false,
+        Reason = "test default",
+        GraphWasUsable = false,
     };
 }

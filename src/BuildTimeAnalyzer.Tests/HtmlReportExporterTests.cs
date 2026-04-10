@@ -39,9 +39,11 @@ public sealed class HtmlReportExporterTests
             PotentiallyCustomTargets = [],
             ReferenceOverhead = null,
             SpanOutliers = [],
+            ProjectCountTax = TestDefaults.EmptyTax(1),
             Graph = TestDefaults.EmptyGraph(1),
             CriticalPath = [],
             CriticalPathTotal = TimeSpan.Zero,
+            CriticalPathValidation = TestDefaults.EmptyValidation(),
         };
     }
 
@@ -175,7 +177,9 @@ public sealed class HtmlReportExporterTests
                 {
                     Number = 1,
                     Title = "Test finding title",
-                    Detail = "Test finding detail",
+                    Measured = "Test measured facts",
+                    LikelyExplanation = "A possible heuristic reason",
+                    InvestigationSuggestion = "Look into this",
                     Severity = FindingSeverity.Critical,
                     Evidence = "SelfTime=10s",
                     ThresholdName = "SomeThreshold=25%",
@@ -193,7 +197,9 @@ public sealed class HtmlReportExporterTests
             HtmlReportExporter.Export(report, path, 10, analysis);
             var html = File.ReadAllText(path);
             await Assert.That(html).Contains("Test finding title");
-            await Assert.That(html).Contains("Test finding detail");
+            await Assert.That(html).Contains("Test measured facts");
+            await Assert.That(html).Contains("A possible heuristic reason");
+            await Assert.That(html).Contains("Look into this");
             await Assert.That(html).Contains("Investigate the issue");
             await Assert.That(html).Contains("severity-critical");
             await Assert.That(html).Contains("SomeThreshold=25%");

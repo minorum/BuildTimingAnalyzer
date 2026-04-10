@@ -1,6 +1,7 @@
 using System.Text;
 using BuildTimeAnalyzer.Models;
 using BuildTimeAnalyzer.Rendering;
+using BuildTimeAnalyzer.Services;
 
 namespace BuildTimeAnalyzer.Export;
 
@@ -18,7 +19,6 @@ public static class HtmlReportExporter
         var statusClass = report.Succeeded ? "success" : "fail";
         var statusText = report.Succeeded ? "Build Succeeded" : "Build Failed";
 
-        // Hard rule: critical path data is only considered present when both the list is non-empty
         var hasCriticalPath = report.CriticalPath.Count > 0 && report.CriticalPathTotal > TimeSpan.Zero;
         var criticalSet = hasCriticalPath
             ? new HashSet<string>(report.CriticalPath.Select(p => p.FullPath), StringComparer.OrdinalIgnoreCase)
@@ -46,6 +46,8 @@ public static class HtmlReportExporter
   .badge { display: inline-block; padding: 4px 14px; border-radius: 999px; font-weight: 700; font-size: 0.9rem; }
   .badge.success { background: #1a3a1e; color: var(--green); }
   .badge.fail    { background: #3a1a1a; color: var(--red); }
+  .badge.accepted { background: #1a3a1e; color: var(--green); }
+  .badge.rejected { background: #3a1a1a; color: var(--red); }
   .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 20px 0; }
   .stat { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 18px; }
   .stat .label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
@@ -61,6 +63,7 @@ public static class HtmlReportExporter
   tr:last-child td { border-bottom: none; }
   tr:hover td { background: #1c2128; }
   tr.critical-path td:first-child { border-left: 3px solid var(--red); padding-left: 11px; }
+  .composition td { background: #0d1117; font-size: 0.82rem; color: var(--muted); padding-left: 36px; }
   .drilldown td { background: #0d1117; font-size: 0.82rem; color: var(--muted); padding-left: 36px; }
   .drilldown td strong { color: var(--text); }
   .bar-wrap { width: 140px; background: #21262d; border-radius: 4px; height: 8px; overflow: hidden; }
@@ -81,16 +84,25 @@ public static class HtmlReportExporter
   .cat-restore { background: #0b1f2d; color: var(--blue); }
   .cat-references { background: #1f0b2d; color: var(--orange); }
   .cat-uncategorized { background: #2d0b1f; color: var(--orange); }
+  .kind-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 0.7rem; background: #21262d; color: var(--muted); margin-left: 6px; }
   footer { margin-top: 40px; color: var(--muted); font-size: 0.78rem; }
   .analysis { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px 24px; margin-top: 8px; }
   .analysis h3 { color: var(--blue); margin-bottom: 16px; font-size: 1rem; }
-  .finding { margin-bottom: 18px; }
+  .finding { margin-bottom: 22px; padding-left: 12px; border-left: 3px solid var(--border); }
   .finding .num { font-weight: 700; margin-right: 6px; }
   .finding .title { font-weight: 700; }
-  .finding .detail { color: var(--muted); margin-top: 4px; font-size: 0.88rem; }
-  .finding .evidence { color: var(--muted); margin-top: 4px; font-size: 0.78rem; font-family: Consolas, monospace; }
+  .finding .layer { margin-top: 6px; font-size: 0.86rem; }
+  .finding .layer-label { display: inline-block; width: 108px; color: var(--muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: .05em; vertical-align: top; }
+  .finding .layer-value { display: inline-block; width: calc(100% - 120px); }
+  .finding .layer-measured .layer-value { color: var(--text); }
+  .finding .layer-likely .layer-value { color: var(--muted); font-style: italic; }
+  .finding .layer-investigate .layer-value { color: var(--green); }
+  .finding .evidence { color: var(--muted); margin-top: 6px; font-size: 0.76rem; font-family: Consolas, monospace; }
+  .severity-critical { border-left-color: var(--red); }
   .severity-critical .num, .severity-critical .title { color: var(--red); }
+  .severity-warning { border-left-color: var(--yellow); }
   .severity-warning .num, .severity-warning .title { color: var(--yellow); }
+  .severity-info { border-left-color: var(--blue); }
   .severity-info .num, .severity-info .title { color: var(--blue); }
   .recommendation { margin: 8px 0; font-size: 0.92rem; }
   .recommendation .num { color: var(--green); font-weight: 700; margin-right: 6px; }
@@ -145,15 +157,15 @@ public static class HtmlReportExporter
             sb.AppendLine("</div>");
 
             if (!report.Graph.IsUsable)
-                sb.AppendLine("<p class=\"note\" style=\"color:var(--yellow)\">Graph has too few edges to be usable for critical path analysis. Check whether ProjectReference extraction captured your project references correctly.</p>");
+                sb.AppendLine("<p class=\"note\" style=\"color:var(--yellow)\">Graph has too few edges for derived analyses (critical path, etc.). Check whether ProjectReference extraction captured your project references correctly.</p>");
         }
 
         // Dependency hubs
         if (report.Graph.TopHubs.Count > 0)
         {
             sb.AppendLine("<h2>Dependency Hubs</h2>");
-            sb.AppendLine("<p class=\"note\">Top projects by fan-in. High fan-in projects tend to be bottlenecks for downstream build scheduling.</p>");
-            sb.AppendLine("<table><thead><tr><th class=\"right\">#</th><th>Project</th><th class=\"right\">Referenced by</th><th class=\"right\">References</th></tr></thead><tbody>");
+            sb.AppendLine("<p class=\"note\">Sorted by transitive dependents (downstream subtree size). High fan-in is a structural signal, not automatic proof of bottleneck status.</p>");
+            sb.AppendLine("<table><thead><tr><th class=\"right\">#</th><th>Project</th><th class=\"right\">Direct Ref by</th><th class=\"right\">Transitive Dependents</th><th class=\"right\">Direct Refs</th></tr></thead><tbody>");
             int rank = 1;
             foreach (var hub in report.Graph.TopHubs.Take(10))
             {
@@ -162,6 +174,7 @@ public static class HtmlReportExporter
   <td class="right rank">{rank++}</td>
   <td>{Esc(hub.ProjectName)}</td>
   <td class="right">{hub.IncomingCount}</td>
+  <td class="right"><strong>{hub.TransitiveDependentsCount}</strong></td>
   <td class="right muted">{hub.OutgoingCount}</td>
 </tr>
 """);
@@ -169,23 +182,46 @@ public static class HtmlReportExporter
             sb.AppendLine("</tbody></table>");
         }
 
-        // Cycles
-        if (report.Graph.Cycles.Count > 0)
+        // Cycle status — always rendered when the graph has nodes
+        if (report.Graph.Nodes.Count > 0)
         {
-            sb.AppendLine("<h2>Dependency Cycles Detected</h2>");
+            sb.AppendLine("<h2>Dependency Cycle Check</h2>");
             sb.AppendLine("<div class=\"analysis\">");
-            foreach (var cycle in report.Graph.Cycles.Take(5))
-                sb.AppendLine($"<div class=\"red\">{Esc(string.Join(" → ", cycle))} → {Esc(cycle[0])}</div>");
+            if (!report.Graph.CycleDetectionRan)
+                sb.AppendLine("<div class=\"muted\">Cycle detection did not run.</div>");
+            else if (report.Graph.Cycles.Count == 0)
+                sb.AppendLine("<div class=\"green\">No project-reference cycles detected.</div>");
+            else
+            {
+                sb.AppendLine($"<div class=\"red\">{report.Graph.Cycles.Count} cycle(s) detected:</div>");
+                foreach (var cycle in report.Graph.Cycles.Take(5))
+                    sb.AppendLine($"<div class=\"red\" style=\"margin-top:6px\">{Esc(string.Join(" → ", cycle))} → {Esc(cycle[0])}</div>");
+            }
             sb.AppendLine("</div>");
         }
 
-        // Critical path — only if validation passed
+        // Critical path validation status — always rendered when the graph has nodes
+        if (report.Graph.Nodes.Count > 0)
+        {
+            var v = report.CriticalPathValidation;
+            var badgeClass = v.Accepted ? "accepted" : "rejected";
+            var badgeText = v.Accepted ? "Accepted" : "Rejected";
+            sb.AppendLine("<h2>Critical Path Validation</h2>");
+            sb.AppendLine("<div class=\"context-grid\">");
+            sb.AppendLine($"<div><span class=\"k\">Graph usable:</span> <span class=\"v\">{(v.GraphWasUsable ? "yes" : "no")}</span></div>");
+            sb.AppendLine($"<div><span class=\"k\">CPM total:</span> <span class=\"v\">{Esc(ConsoleReportRenderer.FormatDuration(v.ComputedTotal))}</span></div>");
+            sb.AppendLine($"<div><span class=\"k\">Wall clock:</span> <span class=\"v\">{Esc(ConsoleReportRenderer.FormatDuration(v.WallClock))}</span></div>");
+            sb.AppendLine($"<div><span class=\"k\">Status:</span> <span class=\"v\"><span class=\"badge {badgeClass}\">{badgeText}</span></span></div>");
+            sb.AppendLine("</div>");
+            sb.AppendLine($"<p class=\"note\">{Esc(v.Reason)}</p>");
+        }
+
+        // Critical path — only when validation passed
         if (hasCriticalPath)
         {
-            sb.AppendLine("<h2>Critical Path</h2>");
-            sb.AppendLine("<p class=\"note\">Estimate of the longest sequential chain implied by the observed project DAG and measured self times. Path total: "
-                + $"{Esc(ConsoleReportRenderer.FormatDuration(report.CriticalPathTotal))} of {Esc(ConsoleReportRenderer.FormatDuration(report.TotalDuration))} wall clock.</p>");
-            sb.AppendLine("<table><thead><tr><th class=\"right\">Step</th><th>Project</th><th class=\"right\">Self Time</th><th class=\"right\">% Self</th></tr></thead><tbody>");
+            sb.AppendLine("<h2>Critical Path Estimate</h2>");
+            sb.AppendLine("<p class=\"note\">Model-based, not a scheduler trace. Derived from the observed ProjectReference DAG and measured self times. Accuracy depends on whether dependency extraction and exclusive timing are capturing your build correctly.</p>");
+            sb.AppendLine("<table><thead><tr><th class=\"right\">Step</th><th>Project</th><th>Kind (heuristic)</th><th class=\"right\">Self Time</th><th class=\"right\">% Self</th></tr></thead><tbody>");
             int step = 1;
             foreach (var p in report.CriticalPath)
             {
@@ -193,12 +229,14 @@ public static class HtmlReportExporter
 <tr class="critical-path">
   <td class="right rank">{step++}</td>
   <td class="red"><strong>{Esc(p.Name)}</strong></td>
+  <td class="muted">{Esc(ProjectKindHeuristic.Label(p.KindHeuristic))}</td>
   <td class="right"><strong>{Esc(ConsoleReportRenderer.FormatDuration(p.SelfTime))}</strong></td>
   <td class="right muted">{p.SelfPercent:F1}%</td>
 </tr>
 """);
             }
             sb.AppendLine("</tbody></table>");
+            sb.AppendLine($"<p class=\"note\">Path total: {Esc(ConsoleReportRenderer.FormatDuration(report.CriticalPathTotal))} of {Esc(ConsoleReportRenderer.FormatDuration(report.TotalDuration))} wall clock.</p>");
         }
 
         // Category totals
@@ -260,8 +298,8 @@ public static class HtmlReportExporter
         if (report.SpanOutliers.Count > 0)
         {
             sb.AppendLine("<h2>Span vs Self Outliers</h2>");
-            sb.AppendLine("<p class=\"note\">Projects where wall-clock span is much longer than actual local work — likely waiting on dependencies or graph scheduling. Rule: Span ≥ 5s, Span/SelfTime ≥ 5x, Span − SelfTime ≥ 3s.</p>");
-            sb.AppendLine("<table><thead><tr><th class=\"right\">#</th><th>Project</th><th class=\"right\">Span</th><th class=\"right\">Self Time</th><th class=\"right\">Ratio</th></tr></thead><tbody>");
+            sb.AppendLine("<p class=\"note\">Rule: Span ≥ 5s, Span/SelfTime ≥ 5x, Span − SelfTime ≥ 3s. The pattern has several possible causes (dependency waiting, SDK orchestration, reference work, static-web-assets, test/benchmark shape, incremental effects) — timing alone does not identify which. Cross-reference with Dependency Hubs and category composition.</p>");
+            sb.AppendLine("<table><thead><tr><th class=\"right\">#</th><th>Project</th><th>Kind (heuristic)</th><th class=\"right\">Span</th><th class=\"right\">Self Time</th><th class=\"right\">Ratio</th></tr></thead><tbody>");
             int r = 1;
             foreach (var p in report.SpanOutliers.Take(15))
             {
@@ -270,6 +308,7 @@ public static class HtmlReportExporter
 <tr>
   <td class="right rank">{r++}</td>
   <td class="yellow">{Esc(p.Name)}</td>
+  <td class="muted">{Esc(ProjectKindHeuristic.Label(p.KindHeuristic))}</td>
   <td class="right"><strong>{Esc(ConsoleReportRenderer.FormatDuration(p.Span))}</strong></td>
   <td class="right muted">{Esc(ConsoleReportRenderer.FormatDuration(p.SelfTime))}</td>
   <td class="right">{ratio:F1}x</td>
@@ -279,12 +318,45 @@ public static class HtmlReportExporter
             sb.AppendLine("</tbody></table>");
         }
 
-        // Timeline with critical path highlighting (only if hasCriticalPath)
+        // Project Count Tax
+        if (report.Projects.Count > 0)
+        {
+            var tax = report.ProjectCountTax;
+            sb.AppendLine("<h2>Project Count Tax Indicators</h2>");
+            sb.AppendLine("<p class=\"note\">Candidate signals that the solution pays graph/orchestration cost disproportionate to local work. Each indicator is a pattern to investigate, not proof of a problem.</p>");
+            sb.AppendLine("<div class=\"context-grid\">");
+            sb.AppendLine($"<div><span class=\"k\">References &gt; compile:</span> <span class=\"v\">{tax.ReferencesExceedCompileCount} of {tax.TotalProjects}</span></div>");
+            sb.AppendLine($"<div><span class=\"k\">References are the majority of self time:</span> <span class=\"v\">{tax.ReferencesMajorityCount} of {tax.TotalProjects}</span></div>");
+            sb.AppendLine($"<div><span class=\"k\">Tiny self / huge span:</span> <span class=\"v\">{tax.TinySelfHugeSpanCount} of {tax.TotalProjects}</span></div>");
+            sb.AppendLine("</div>");
+
+            if (tax.PerKindStats.Count > 0)
+            {
+                sb.AppendLine("<p class=\"note\">Per-kind medians (name-based heuristic — not authoritative).</p>");
+                sb.AppendLine("<table><thead><tr><th>Kind</th><th class=\"right\">Count</th><th class=\"right\">Median Self</th><th class=\"right\">Median Span</th><th class=\"right\">Median Span/Self</th></tr></thead><tbody>");
+                foreach (var s in tax.PerKindStats)
+                {
+                    var ratio = s.MedianSpanToSelfRatio > 0 ? $"{s.MedianSpanToSelfRatio:F1}x" : "n/a";
+                    sb.AppendLine($"""
+<tr>
+  <td class="muted">{Esc(ProjectKindHeuristic.Label(s.Kind))}</td>
+  <td class="right">{s.Count}</td>
+  <td class="right">{Esc(ConsoleReportRenderer.FormatDuration(s.MedianSelfTime))}</td>
+  <td class="right">{Esc(ConsoleReportRenderer.FormatDuration(s.MedianSpan))}</td>
+  <td class="right">{ratio}</td>
+</tr>
+""");
+                }
+                sb.AppendLine("</tbody></table>");
+            }
+        }
+
+        // Timeline
         if (report.Projects.Count > 0 && report.TotalDuration.TotalMilliseconds > 0)
         {
             sb.AppendLine("<h2>Build Timeline</h2>");
             var subtitle = hasCriticalPath
-                ? "Wall-clock Span per project. Red bars are on the critical path; grey bars are not."
+                ? "Wall-clock Span per project. Red bars are on the critical path estimate; grey bars are not."
                 : "Wall-clock Span per project.";
             sb.AppendLine($"<p class=\"note\">{subtitle}</p>");
             sb.AppendLine("<div class=\"analysis\" style=\"overflow-x:auto\">");
@@ -318,7 +390,7 @@ public static class HtmlReportExporter
             sb.AppendLine("</div>");
         }
 
-        // Projects table with drill-down
+        // Projects table with drill-down + category composition
         sb.AppendLine("<h2>Top Projects by Self Time</h2>");
         sb.AppendLine("<p class=\"note\">Self Time = genuinely exclusive work. Span = wall-clock first-to-last activity (display only).</p>");
         sb.AppendLine("<table><thead><tr><th class=\"right\">#</th><th>Project</th><th class=\"right\">Self Time</th><th class=\"right\">Span</th><th class=\"right\">% Self</th><th>Share</th><th class=\"right\">Errors</th><th class=\"right\">Warnings</th></tr></thead><tbody>");
@@ -332,11 +404,14 @@ public static class HtmlReportExporter
             var errCell = p.ErrorCount > 0 ? $"<span class=\"red\">{p.ErrorCount}</span>" : "<span class=\"muted\">0</span>";
             var warnCell = p.WarningCount > 0 ? $"<span class=\"yellow\">{p.WarningCount}</span>" : "<span class=\"muted\">0</span>";
             var rowClass = (hasCriticalPath && criticalSet.Contains(p.FullPath)) ? " class=\"critical-path\"" : "";
+            var kindBadge = p.KindHeuristic != ProjectKind.Other
+                ? $"<span class=\"kind-badge\">{Esc(ProjectKindHeuristic.Label(p.KindHeuristic))}</span>"
+                : "";
 
             sb.AppendLine($"""
 <tr{rowClass}>
   <td class="right rank">{projRank++}</td>
-  <td>{icon}{Esc(p.Name)}</td>
+  <td>{icon}{Esc(p.Name)}{kindBadge}</td>
   <td class="right"><strong>{Esc(ConsoleReportRenderer.FormatDuration(p.SelfTime))}</strong></td>
   <td class="right muted">{Esc(ConsoleReportRenderer.FormatDuration(p.Span))}</td>
   <td class="right muted">{p.SelfPercent:F1}%</td>
@@ -346,6 +421,22 @@ public static class HtmlReportExporter
 </tr>
 """);
 
+            // Category composition row
+            if (p.CategoryBreakdown.Count > 0)
+            {
+                var composition = FormatCategoryComposition(p);
+                if (composition.Length > 0)
+                {
+                    sb.AppendLine($"""
+<tr class="composition">
+  <td></td>
+  <td colspan="7"><em>composition:</em> {Esc(composition)}</td>
+</tr>
+""");
+                }
+            }
+
+            // Target drill-down
             foreach (var t in p.Targets)
             {
                 sb.AppendLine($"""
@@ -385,7 +476,7 @@ public static class HtmlReportExporter
             sb.AppendLine("</tbody></table>");
         }
 
-        // Potentially custom targets — only if there's something non-trivial
+        // Potentially custom targets
         var customTargets = report.PotentiallyCustomTargets.Where(t => t.SelfTime.TotalSeconds >= 1).Take(5).ToList();
         if (customTargets.Count > 0)
         {
@@ -407,12 +498,12 @@ public static class HtmlReportExporter
             sb.AppendLine("</tbody></table>");
         }
 
-        // Analysis section
+        // Analysis section with layered findings
         if (analysis is { Findings.Count: > 0 })
         {
             sb.AppendLine("<h2>Analysis</h2>");
+            sb.AppendLine("<p class=\"note\">Findings are structured as <strong>Measured</strong> (facts), <strong>Likely explanation</strong> (heuristic hypothesis when present), and <strong>Investigate</strong> (next step).</p>");
             sb.AppendLine("<div class=\"analysis\">");
-            sb.AppendLine("<h3>Key Findings</h3>");
             foreach (var f in analysis.Findings)
             {
                 var sevClass = f.Severity switch
@@ -423,11 +514,14 @@ public static class HtmlReportExporter
                 };
                 sb.AppendLine($"""
 <div class="finding {sevClass}">
-  <span class="num">{f.Number}.</span><span class="title">{Esc(f.Title)}</span>
-  <div class="detail">{Esc(f.Detail)}</div>
-  <div class="evidence">Evidence: {Esc(f.Evidence)} &nbsp; · &nbsp; Threshold: {Esc(f.ThresholdName)}</div>
-</div>
+  <div><span class="num">{f.Number}.</span><span class="title">{Esc(f.Title)}</span></div>
+  <div class="layer layer-measured"><span class="layer-label">Measured</span><span class="layer-value">{Esc(f.Measured)}</span></div>
 """);
+                if (!string.IsNullOrEmpty(f.LikelyExplanation))
+                    sb.AppendLine($"  <div class=\"layer layer-likely\"><span class=\"layer-label\">Likely</span><span class=\"layer-value\">{Esc(f.LikelyExplanation)}</span></div>");
+                sb.AppendLine($"  <div class=\"layer layer-investigate\"><span class=\"layer-label\">Investigate</span><span class=\"layer-value\">{Esc(f.InvestigationSuggestion)}</span></div>");
+                sb.AppendLine($"  <div class=\"evidence\">Evidence: {Esc(f.Evidence)} &nbsp; · &nbsp; Threshold: {Esc(f.ThresholdName)}</div>");
+                sb.AppendLine("</div>");
             }
 
             if (analysis.Recommendations.Count > 0)
@@ -444,6 +538,21 @@ public static class HtmlReportExporter
         sb.AppendLine("</body></html>");
 
         return sb.ToString();
+    }
+
+    private static string FormatCategoryComposition(ProjectTiming p)
+    {
+        // Normalise against the sum of the breakdown so percentages always add to 100%.
+        var totalMs = p.CategoryBreakdown.Sum(kv => kv.Value.TotalMilliseconds);
+        if (totalMs <= 0) return "";
+
+        var parts = p.CategoryBreakdown
+            .Where(kv => kv.Value.TotalMilliseconds > 0)
+            .OrderByDescending(kv => kv.Value)
+            .Take(5)
+            .Select(kv => $"{CategoryLabel(kv.Key)} {kv.Value.TotalMilliseconds / totalMs * 100:F0}%");
+
+        return string.Join(", ", parts);
     }
 
     private static List<(string Key, string Value)> BuildContextRows(BuildReport report)
