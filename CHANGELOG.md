@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.0.12
+
+Fixes a regression introduced in v0.0.11: corporate antivirus engines started
+flagging the release zip because the in-process pager introduced Win32 console input
+API calls and terminal control sequence strings into the binary. Together those
+looked like a classic keylogger signature to heuristic scanners.
+
+### Pager reimplemented as an external subprocess
+- The pager is now spawned as a separate process (like git, man, psql, kubectl do)
+- The subprocess reads content from our stdin pipe and handles keyboard input itself
+- Our binary no longer contains any keyboard-reading APIs or terminal control strings
+- Same pager UX, better features (you get full `less` with search, regex, etc.)
+
+### Pager selection
+- `BTANALYZER_PAGER` environment variable (tool-specific override)
+- `PAGER` environment variable (standard Unix convention)
+- Platform default: `more` on Windows, `less -R -F` on Unix
+- `-F` makes `less` auto-exit when the content fits in one screen, so short reports
+  don't show a pager prompt
+- `--no-pager` flag still works the same way
+
+### Behavior
+- If the selected pager is not found, falls back to direct output
+- If stdout is redirected (piped to a file or grep), the pager is skipped automatically
+- If writing to the pager fails mid-stream (user quit with `q`), we handle the broken
+  pipe cleanly and exit normally
+
+### Binary profile
+- No `Console.ReadKey` anywhere
+- No ANSI escape sequences in string literals
+- Import table matches v0.0.10 (no new console input APIs)
+- Should no longer trip corporate AV heuristics that flagged v0.0.11
+
 ## 0.0.11
 
 Report information architecture overhaul. The default report is now answer-first, not

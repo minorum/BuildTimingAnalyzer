@@ -1,18 +1,21 @@
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+
 namespace BuildTimeAnalyzer.Rendering;
 
 /// <summary>
-/// Minimal terminal pager using ANSI escape codes. No third-party dependencies.
+/// Pages output by spawning the system pager as a subprocess (like git, man, psql, kubectl).
+/// The subprocess reads its content from our stdin pipe and handles keyboard input on its
+/// own — we never touch keyboard input or write any terminal control sequences ourselves.
 ///
-/// Features:
-///   • Alternate screen buffer (\x1b[?1049h / \x1b[?1049l) — preserves scrollback on exit
-///   • Cursor hide/show around the session
-///   • Reverse-video status bar at the bottom
-///   • Automatic fallback to direct output when stdout is redirected or the content fits
-///   • Auto-detection of viewport resize between paints
+/// Pager selection (in priority order):
+///   1. <c>BTANALYZER_PAGER</c> environment variable
+///   2. <c>PAGER</c> environment variable
+///   3. Platform default: <c>more</c> on Windows, <c>less -R -F</c> on Unix
 ///
-/// Keys: Space / PgDn / f — forward page, b / PgUp — back page,
-///       j / Down — line down, k / Up — line up,
-///       g / Home — top, G / End — bottom, q / Esc — quit
+/// This design deliberately avoids in-process pager implementations because doing so
+/// would require linking against Win32 console input APIs that heuristic-based AV
+/// scanners treat as suspicious for unsigned binaries.
 /// </summary>
 public static class ConsolePager
 {
@@ -20,44 +23,103 @@ public static class ConsolePager
     {
         if (lines.Count == 0) return;
 
-        // Non-interactive: write everything and return
+        // Non-interactive stdout: just write everything and return
         if (Console.IsOutputRedirected)
         {
             WriteAllPlain(lines);
             return;
         }
 
-        int viewportHeight;
+        var (fileName, arguments) = ResolvePagerCommand();
+        if (string.IsNullOrEmpty(fileName))
+        {
+            WriteAllPlain(lines);
+            return;
+        }
+
+        if (!TryRunPager(fileName, arguments, lines))
+        {
+            WriteAllPlain(lines);
+        }
+    }
+
+    private static (string FileName, string Arguments) ResolvePagerCommand()
+    {
+        var userPager = Environment.GetEnvironmentVariable("BTANALYZER_PAGER");
+        if (string.IsNullOrWhiteSpace(userPager))
+            userPager = Environment.GetEnvironmentVariable("PAGER");
+
+        if (!string.IsNullOrWhiteSpace(userPager))
+            return SplitCommand(userPager);
+
+        // Platform default
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return ("more", string.Empty);
+
+        // -R: pass through colour codes (future-proofing)
+        // -F: quit if the content fits in one screen (no prompt for short reports)
+        return ("less", "-R -F");
+    }
+
+    private static (string FileName, string Arguments) SplitCommand(string command)
+    {
+        command = command.Trim();
+        if (command.Length == 0) return (string.Empty, string.Empty);
+
+        // Simple split on the first whitespace. For complex pager commands with quoted args,
+        // the user can set PAGER to a shell wrapper (which is also the Unix convention).
+        var firstSpace = command.IndexOf(' ');
+        if (firstSpace < 0) return (command, string.Empty);
+        return (command[..firstSpace], command[(firstSpace + 1)..]);
+    }
+
+    private static bool TryRunPager(string fileName, string arguments, IReadOnlyList<string> lines)
+    {
+        Process? process;
         try
         {
-            viewportHeight = Math.Max(1, Console.WindowHeight - 1);
+            process = Process.Start(new ProcessStartInfo
+            {
+                FileName = fileName,
+                Arguments = arguments,
+                RedirectStandardInput = true,
+                UseShellExecute = false,
+            });
         }
         catch
         {
-            // ReadKey won't work either — fall back to plain output
-            WriteAllPlain(lines);
-            return;
+            // Pager executable not found, not executable, or similar — fall back.
+            return false;
         }
 
-        // If everything fits without scrolling, skip the pager ceremony
-        if (lines.Count <= viewportHeight)
-        {
-            WriteAllPlain(lines);
-            return;
-        }
+        if (process is null) return false;
 
         try
         {
-            RunPager(lines);
+            var writer = process.StandardInput;
+            try
+            {
+                foreach (var line in lines)
+                    writer.WriteLine(line);
+            }
+            catch (IOException)
+            {
+                // User pressed 'q' — the pager closed its stdin while we were still writing.
+                // Normal termination; not an error.
+            }
+            finally
+            {
+                try { writer.Close(); } catch (IOException) { /* pipe may already be closed */ }
+            }
+
+            process.WaitForExit();
+            return true;
         }
-        catch (InvalidOperationException)
+        catch
         {
-            // Console is not interactive (redirected / no tty). Fall back.
-            WriteAllPlain(lines);
-        }
-        catch (PlatformNotSupportedException)
-        {
-            WriteAllPlain(lines);
+            // If anything goes wrong while piping, surface the content via direct output instead.
+            try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { }
+            return false;
         }
     }
 
@@ -65,116 +127,5 @@ public static class ConsolePager
     {
         foreach (var line in lines)
             Console.WriteLine(line);
-    }
-
-    private static void RunPager(IReadOnlyList<string> lines)
-    {
-        // Enter alternate screen buffer + hide cursor
-        Console.Write("\x1b[?1049h");
-        Console.Write("\x1b[?25l");
-
-        try
-        {
-            int top = 0;
-            int lastHeight = -1, lastWidth = -1, lastTop = -1;
-
-            while (true)
-            {
-                int height = Math.Max(1, Console.WindowHeight - 1);
-                int width = Math.Max(1, Console.WindowWidth);
-                int maxTop = Math.Max(0, lines.Count - height);
-                if (top > maxTop) top = maxTop;
-                if (top < 0) top = 0;
-
-                // Repaint only when something changed
-                if (height != lastHeight || width != lastWidth || top != lastTop)
-                {
-                    Paint(lines, top, height, width);
-                    lastHeight = height;
-                    lastWidth = width;
-                    lastTop = top;
-                }
-
-                var key = Console.ReadKey(intercept: true);
-                var page = height; // one page = one full viewport
-
-                switch (key.Key)
-                {
-                    case ConsoleKey.Q:
-                    case ConsoleKey.Escape:
-                        return;
-
-                    case ConsoleKey.Spacebar:
-                    case ConsoleKey.PageDown:
-                    case ConsoleKey.F:
-                        top = Math.Min(top + page, maxTop);
-                        break;
-
-                    case ConsoleKey.B:
-                    case ConsoleKey.PageUp:
-                        top = Math.Max(0, top - page);
-                        break;
-
-                    case ConsoleKey.DownArrow:
-                    case ConsoleKey.J:
-                    case ConsoleKey.Enter:
-                        top = Math.Min(top + 1, maxTop);
-                        break;
-
-                    case ConsoleKey.UpArrow:
-                    case ConsoleKey.K:
-                        top = Math.Max(0, top - 1);
-                        break;
-
-                    case ConsoleKey.Home:
-                        top = 0;
-                        break;
-
-                    case ConsoleKey.End:
-                        top = maxTop;
-                        break;
-
-                    case ConsoleKey.G:
-                        top = key.Modifiers.HasFlag(ConsoleModifiers.Shift) ? maxTop : 0;
-                        break;
-
-                    default:
-                        break;
-                }
-            }
-        }
-        finally
-        {
-            // Show cursor + leave alternate screen buffer
-            Console.Write("\x1b[?25h");
-            Console.Write("\x1b[?1049l");
-        }
-    }
-
-    private static void Paint(IReadOnlyList<string> lines, int top, int height, int width)
-    {
-        // Cursor home + clear screen
-        Console.Write("\x1b[H\x1b[2J");
-
-        int end = Math.Min(top + height, lines.Count);
-        for (int i = top; i < end; i++)
-        {
-            var line = lines[i];
-            if (line.Length > width)
-                line = line[..width];
-            Console.WriteLine(line);
-        }
-
-        // Pad empty lines up to the status bar
-        for (int i = end - top; i < height; i++)
-            Console.WriteLine();
-
-        // Status bar (reverse video)
-        var pct = lines.Count > 0 ? (int)((double)end / lines.Count * 100) : 100;
-        var status = $" {end}/{lines.Count} ({pct}%)   q=quit  space/pgdn=down  b/pgup=up  g=top  G=bottom ";
-        if (status.Length > width) status = status[..width];
-        else status = status.PadRight(width);
-
-        Console.Write("\x1b[7m" + status + "\x1b[0m");
     }
 }
