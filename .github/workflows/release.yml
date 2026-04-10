@@ -49,7 +49,7 @@ jobs:
         run: dotnet build ${{ env.SOLUTION }} --configuration Release --no-restore
 
       - name: Test
-        run: dotnet test ${{ env.SOLUTION }} --configuration Release --no-build
+        run: dotnet test --solution ${{ env.SOLUTION }} --configuration Release --no-build
 
   # Build AOT binaries per platform — each target on its native OS (no cross-compile)
   build:
