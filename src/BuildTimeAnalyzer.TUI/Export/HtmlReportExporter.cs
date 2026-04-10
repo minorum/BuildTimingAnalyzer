@@ -17,9 +17,12 @@ public static class HtmlReportExporter
         var sb = new StringBuilder();
         var statusClass = report.Succeeded ? "success" : "fail";
         var statusText = report.Succeeded ? "Build Succeeded" : "Build Failed";
-        var criticalSet = new HashSet<string>(
-            report.CriticalPath.Select(p => p.FullPath),
-            StringComparer.OrdinalIgnoreCase);
+
+        // Hard rule: critical path data is only considered present when both the list is non-empty
+        var hasCriticalPath = report.CriticalPath.Count > 0 && report.CriticalPathTotal > TimeSpan.Zero;
+        var criticalSet = hasCriticalPath
+            ? new HashSet<string>(report.CriticalPath.Select(p => p.FullPath), StringComparer.OrdinalIgnoreCase)
+            : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         sb.AppendLine($$"""
 <!DOCTYPE html>
@@ -47,6 +50,7 @@ public static class HtmlReportExporter
   .stat { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 18px; }
   .stat .label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
   .stat .value { font-size: 1.4rem; font-weight: 700; margin-top: 4px; }
+  .stat .sub { font-size: 0.75rem; color: var(--muted); margin-top: 4px; }
   .context-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px 24px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; margin: 12px 0 24px; }
   .context-grid .k { color: var(--muted); font-size: 0.82rem; }
   .context-grid .v { font-size: 0.9rem; }
@@ -75,6 +79,7 @@ public static class HtmlReportExporter
   .cat-compile { background: #0b2d1f; color: var(--green); }
   .cat-copy { background: #2d230b; color: var(--yellow); }
   .cat-restore { background: #0b1f2d; color: var(--blue); }
+  .cat-references { background: #1f0b2d; color: var(--orange); }
   .cat-uncategorized { background: #2d0b1f; color: var(--orange); }
   footer { margin-top: 40px; color: var(--muted); font-size: 0.78rem; }
   .analysis { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px 24px; margin-top: 8px; }
@@ -106,7 +111,11 @@ public static class HtmlReportExporter
   <div class="stat"><div class="label">Started</div><div class="value" style="font-size:1rem">{{report.StartTime:HH:mm:ss}}</div></div>
   <div class="stat"><div class="label">Projects</div><div class="value">{{report.Projects.Count}}</div></div>
   <div class="stat"><div class="label">Errors</div><div class="value {{(report.ErrorCount > 0 ? "red" : "")}}">{{report.ErrorCount}}</div></div>
-  <div class="stat"><div class="label">Warnings</div><div class="value {{(report.WarningCount > 0 ? "yellow" : "")}}">{{report.WarningCount}}</div></div>
+  <div class="stat">
+    <div class="label">Warnings</div>
+    <div class="value {{(report.WarningCount > 0 ? "yellow" : "")}}">{{report.WarningCount}} total</div>
+    <div class="sub">{{report.AttributedWarningCount}} attributed &middot; {{report.UnattributedWarningCount}} unattributed</div>
+  </div>
 </div>
 """);
 
@@ -121,8 +130,57 @@ public static class HtmlReportExporter
             sb.AppendLine("</div>");
         }
 
-        // Critical path
-        if (report.CriticalPath.Count > 0)
+        // Graph health
+        if (report.Graph.Nodes.Count > 0)
+        {
+            var h = report.Graph.Health;
+            sb.AppendLine("<h2>Dependency Graph Health</h2>");
+            sb.AppendLine("<div class=\"context-grid\">");
+            sb.AppendLine($"<div><span class=\"k\">Total projects:</span> <span class=\"v\">{h.TotalProjects}</span></div>");
+            sb.AppendLine($"<div><span class=\"k\">Total edges:</span> <span class=\"v\">{h.TotalEdges}</span></div>");
+            sb.AppendLine($"<div><span class=\"k\">Nodes with outgoing:</span> <span class=\"v\">{h.NodesWithOutgoing}</span></div>");
+            sb.AppendLine($"<div><span class=\"k\">Nodes with incoming:</span> <span class=\"v\">{h.NodesWithIncoming}</span></div>");
+            sb.AppendLine($"<div><span class=\"k\">Isolated nodes:</span> <span class=\"v\">{h.IsolatedNodes}</span></div>");
+            sb.AppendLine($"<div><span class=\"k\">Longest chain:</span> <span class=\"v\">{report.Graph.LongestChainProjectCount} projects</span></div>");
+            sb.AppendLine("</div>");
+
+            if (!report.Graph.IsUsable)
+                sb.AppendLine("<p class=\"note\" style=\"color:var(--yellow)\">Graph has too few edges to be usable for critical path analysis. Check whether ProjectReference extraction captured your project references correctly.</p>");
+        }
+
+        // Dependency hubs
+        if (report.Graph.TopHubs.Count > 0)
+        {
+            sb.AppendLine("<h2>Dependency Hubs</h2>");
+            sb.AppendLine("<p class=\"note\">Top projects by fan-in. High fan-in projects tend to be bottlenecks for downstream build scheduling.</p>");
+            sb.AppendLine("<table><thead><tr><th class=\"right\">#</th><th>Project</th><th class=\"right\">Referenced by</th><th class=\"right\">References</th></tr></thead><tbody>");
+            int rank = 1;
+            foreach (var hub in report.Graph.TopHubs.Take(10))
+            {
+                sb.AppendLine($"""
+<tr>
+  <td class="right rank">{rank++}</td>
+  <td>{Esc(hub.ProjectName)}</td>
+  <td class="right">{hub.IncomingCount}</td>
+  <td class="right muted">{hub.OutgoingCount}</td>
+</tr>
+""");
+            }
+            sb.AppendLine("</tbody></table>");
+        }
+
+        // Cycles
+        if (report.Graph.Cycles.Count > 0)
+        {
+            sb.AppendLine("<h2>Dependency Cycles Detected</h2>");
+            sb.AppendLine("<div class=\"analysis\">");
+            foreach (var cycle in report.Graph.Cycles.Take(5))
+                sb.AppendLine($"<div class=\"red\">{Esc(string.Join(" → ", cycle))} → {Esc(cycle[0])}</div>");
+            sb.AppendLine("</div>");
+        }
+
+        // Critical path — only if validation passed
+        if (hasCriticalPath)
         {
             sb.AppendLine("<h2>Critical Path</h2>");
             sb.AppendLine("<p class=\"note\">Estimate of the longest sequential chain implied by the observed project DAG and measured self times. Path total: "
@@ -133,22 +191,102 @@ public static class HtmlReportExporter
             {
                 sb.AppendLine($"""
 <tr class="critical-path">
-  <td class="right rank">{step}</td>
+  <td class="right rank">{step++}</td>
   <td class="red"><strong>{Esc(p.Name)}</strong></td>
   <td class="right"><strong>{Esc(ConsoleReportRenderer.FormatDuration(p.SelfTime))}</strong></td>
   <td class="right muted">{p.SelfPercent:F1}%</td>
 </tr>
 """);
-                step++;
             }
             sb.AppendLine("</tbody></table>");
         }
 
-        // Timeline with critical path highlighting
+        // Category totals
+        if (report.CategoryTotals.Count > 0)
+        {
+            var totalSelfMs = report.CategoryTotals.Sum(kv => kv.Value.TotalMilliseconds);
+            if (totalSelfMs > 0)
+            {
+                sb.AppendLine("<h2>Self Time by Category</h2>");
+                sb.AppendLine("<table><thead><tr><th>Category</th><th class=\"right\">Self Time</th><th class=\"right\">% Self</th><th>Share</th></tr></thead><tbody>");
+                foreach (var kv in report.CategoryTotals.OrderByDescending(x => x.Value))
+                {
+                    var pct = kv.Value.TotalMilliseconds / totalSelfMs * 100;
+                    var barClass = pct > 50 ? "bar-high" : pct > 20 ? "bar-mid" : "bar-low";
+                    sb.AppendLine($"""
+<tr>
+  <td><span class="cat-badge cat-{kv.Key.ToString().ToLowerInvariant()}">{Esc(CategoryLabel(kv.Key))}</span></td>
+  <td class="right"><strong>{Esc(ConsoleReportRenderer.FormatDuration(kv.Value))}</strong></td>
+  <td class="right muted">{pct:F1}%</td>
+  <td><div class="bar-wrap"><div class="bar-fill {barClass}" style="width:{Math.Min(100, pct):F1}%"></div></div></td>
+</tr>
+""");
+                }
+                sb.AppendLine("</tbody></table>");
+            }
+        }
+
+        // Reference overhead
+        if (report.ReferenceOverhead is { } overhead)
+        {
+            sb.AppendLine("<h2>Reference Overhead</h2>");
+            sb.AppendLine("<p class=\"note\">Aggregated reference-related work across the solution (ResolveAssemblyReferences, ProcessFrameworkReferences, _HandlePackageFileConflicts, etc.).</p>");
+            sb.AppendLine("<div class=\"context-grid\">");
+            sb.AppendLine($"<div><span class=\"k\">Total self time in reference work:</span> <span class=\"v\">{Esc(ConsoleReportRenderer.FormatDuration(overhead.TotalSelfTime))}</span></div>");
+            sb.AppendLine($"<div><span class=\"k\">Share of total self time:</span> <span class=\"v\">{overhead.SelfPercent:F1}%</span></div>");
+            sb.AppendLine($"<div><span class=\"k\">Projects paying the cost:</span> <span class=\"v\">{overhead.PayingProjectsCount} of {overhead.TotalProjectsCount} ({overhead.PayingProjectsPercent:F0}%)</span></div>");
+            sb.AppendLine($"<div><span class=\"k\">Median per paying project:</span> <span class=\"v\">{Esc(ConsoleReportRenderer.FormatDuration(overhead.MedianPerPayingProject))}</span></div>");
+            sb.AppendLine("</div>");
+
+            if (overhead.TopProjects.Count > 0)
+            {
+                sb.AppendLine("<table><thead><tr><th class=\"right\">#</th><th>Project</th><th class=\"right\">Reference Self Time</th></tr></thead><tbody>");
+                int r = 1;
+                foreach (var p in overhead.TopProjects.Take(10))
+                {
+                    sb.AppendLine($"""
+<tr>
+  <td class="right rank">{r++}</td>
+  <td>{Esc(p.ProjectName)}</td>
+  <td class="right"><strong>{Esc(ConsoleReportRenderer.FormatDuration(p.SelfTime))}</strong></td>
+</tr>
+""");
+                }
+                sb.AppendLine("</tbody></table>");
+            }
+        }
+
+        // Span outliers
+        if (report.SpanOutliers.Count > 0)
+        {
+            sb.AppendLine("<h2>Span vs Self Outliers</h2>");
+            sb.AppendLine("<p class=\"note\">Projects where wall-clock span is much longer than actual local work — likely waiting on dependencies or graph scheduling. Rule: Span ≥ 5s, Span/SelfTime ≥ 5x, Span − SelfTime ≥ 3s.</p>");
+            sb.AppendLine("<table><thead><tr><th class=\"right\">#</th><th>Project</th><th class=\"right\">Span</th><th class=\"right\">Self Time</th><th class=\"right\">Ratio</th></tr></thead><tbody>");
+            int r = 1;
+            foreach (var p in report.SpanOutliers.Take(15))
+            {
+                var ratio = p.SelfTime.TotalMilliseconds > 0 ? p.Span.TotalMilliseconds / p.SelfTime.TotalMilliseconds : 0;
+                sb.AppendLine($"""
+<tr>
+  <td class="right rank">{r++}</td>
+  <td class="yellow">{Esc(p.Name)}</td>
+  <td class="right"><strong>{Esc(ConsoleReportRenderer.FormatDuration(p.Span))}</strong></td>
+  <td class="right muted">{Esc(ConsoleReportRenderer.FormatDuration(p.SelfTime))}</td>
+  <td class="right">{ratio:F1}x</td>
+</tr>
+""");
+            }
+            sb.AppendLine("</tbody></table>");
+        }
+
+        // Timeline with critical path highlighting (only if hasCriticalPath)
         if (report.Projects.Count > 0 && report.TotalDuration.TotalMilliseconds > 0)
         {
             sb.AppendLine("<h2>Build Timeline</h2>");
-            sb.AppendLine("<p class=\"note\">Wall-clock Span per project. Red bars are on the critical path; grey bars are not.</p>");
+            var subtitle = hasCriticalPath
+                ? "Wall-clock Span per project. Red bars are on the critical path; grey bars are not."
+                : "Wall-clock Span per project.";
+            sb.AppendLine($"<p class=\"note\">{subtitle}</p>");
             sb.AppendLine("<div class=\"analysis\" style=\"overflow-x:auto\">");
             var totalMs = report.TotalDuration.TotalMilliseconds;
             var timelineProjects = report.Projects.OrderBy(p => p.StartOffset).ToList();
@@ -156,7 +294,7 @@ public static class HtmlReportExporter
             {
                 var leftPct = p.StartOffset.TotalMilliseconds / totalMs * 100;
                 var widthPct = Math.Max(0.5, (p.EndOffset - p.StartOffset).TotalMilliseconds / totalMs * 100);
-                var onCritical = criticalSet.Contains(p.FullPath);
+                var onCritical = hasCriticalPath && criticalSet.Contains(p.FullPath);
                 var barColor = onCritical ? "var(--red)" : "var(--muted)";
                 var rowClass = onCritical ? "timeline-row critical" : "timeline-row";
                 sb.AppendLine($"""
@@ -169,15 +307,11 @@ public static class HtmlReportExporter
 </div>
 """);
             }
-            // Axis
             sb.AppendLine("<div class=\"timeline-row\" style=\"margin-top:6px; color:var(--muted); font-size:0.75rem\">");
             sb.AppendLine("<span class=\"name\"></span>");
             sb.AppendLine("<div class=\"track\" style=\"background:transparent; display:flex; justify-content:space-between\">");
             for (int i = 0; i <= 4; i++)
-            {
-                var t = ConsoleReportRenderer.FormatDuration(TimeSpan.FromMilliseconds(totalMs * i / 4));
-                sb.AppendLine($"<span>{Esc(t)}</span>");
-            }
+                sb.AppendLine($"<span>{Esc(ConsoleReportRenderer.FormatDuration(TimeSpan.FromMilliseconds(totalMs * i / 4)))}</span>");
             sb.AppendLine("</div>");
             sb.AppendLine("<span class=\"dur\"></span>");
             sb.AppendLine("</div>");
@@ -189,7 +323,7 @@ public static class HtmlReportExporter
         sb.AppendLine("<p class=\"note\">Self Time = genuinely exclusive work. Span = wall-clock first-to-last activity (display only).</p>");
         sb.AppendLine("<table><thead><tr><th class=\"right\">#</th><th>Project</th><th class=\"right\">Self Time</th><th class=\"right\">Span</th><th class=\"right\">% Self</th><th>Share</th><th class=\"right\">Errors</th><th class=\"right\">Warnings</th></tr></thead><tbody>");
 
-        int rank = 1;
+        int projRank = 1;
         foreach (var p in report.Projects.Take(topN))
         {
             var barClass = p.SelfPercent > 50 ? "bar-high" : p.SelfPercent > 20 ? "bar-mid" : "bar-low";
@@ -197,11 +331,11 @@ public static class HtmlReportExporter
             var icon = p.Succeeded ? "" : "<span class=\"red\">! </span>";
             var errCell = p.ErrorCount > 0 ? $"<span class=\"red\">{p.ErrorCount}</span>" : "<span class=\"muted\">0</span>";
             var warnCell = p.WarningCount > 0 ? $"<span class=\"yellow\">{p.WarningCount}</span>" : "<span class=\"muted\">0</span>";
-            var rowClass = criticalSet.Contains(p.FullPath) ? " class=\"critical-path\"" : "";
+            var rowClass = (hasCriticalPath && criticalSet.Contains(p.FullPath)) ? " class=\"critical-path\"" : "";
 
             sb.AppendLine($"""
 <tr{rowClass}>
-  <td class="right rank">{rank++}</td>
+  <td class="right rank">{projRank++}</td>
   <td>{icon}{Esc(p.Name)}</td>
   <td class="right"><strong>{Esc(ConsoleReportRenderer.FormatDuration(p.SelfTime))}</strong></td>
   <td class="right muted">{Esc(ConsoleReportRenderer.FormatDuration(p.Span))}</td>
@@ -212,7 +346,6 @@ public static class HtmlReportExporter
 </tr>
 """);
 
-            // Inline drill-down for projects that have target data populated
             foreach (var t in p.Targets)
             {
                 sb.AppendLine($"""
@@ -235,12 +368,12 @@ public static class HtmlReportExporter
             sb.AppendLine("<p class=\"note\">Categories are deterministic pattern matches against SDK target names — a grouping hint, not authoritative.</p>");
             sb.AppendLine("<table><thead><tr><th class=\"right\">#</th><th>Target</th><th>Project</th><th>Category</th><th class=\"right\">Self Time</th><th class=\"right\">% Self</th></tr></thead><tbody>");
 
-            rank = 1;
+            int r = 1;
             foreach (var t in report.TopTargets)
             {
                 sb.AppendLine($"""
 <tr>
-  <td class="right rank">{rank++}</td>
+  <td class="right rank">{r++}</td>
   <td class="cyan">{Esc(t.Name)}</td>
   <td class="muted">{Esc(t.ProjectName)}</td>
   <td><span class="cat-badge cat-{t.Category.ToString().ToLowerInvariant()}">{Esc(CategoryLabel(t.Category))}</span></td>
@@ -252,18 +385,19 @@ public static class HtmlReportExporter
             sb.AppendLine("</tbody></table>");
         }
 
-        // Potentially custom targets
-        if (report.PotentiallyCustomTargets.Count > 0)
+        // Potentially custom targets — only if there's something non-trivial
+        var customTargets = report.PotentiallyCustomTargets.Where(t => t.SelfTime.TotalSeconds >= 1).Take(5).ToList();
+        if (customTargets.Count > 0)
         {
             sb.AppendLine("<h2>Potentially Custom Targets</h2>");
-            sb.AppendLine("<p class=\"note\">Targets that did not match any known SDK pattern. Often actionable optimization hotspots — investigate individually.</p>");
+            sb.AppendLine("<p class=\"note\">Targets that did not match any known SDK pattern and took at least 1s. Often actionable optimization hotspots.</p>");
             sb.AppendLine("<table><thead><tr><th class=\"right\">#</th><th>Target</th><th>Project</th><th class=\"right\">Self Time</th></tr></thead><tbody>");
-            rank = 1;
-            foreach (var t in report.PotentiallyCustomTargets.Take(15))
+            int r = 1;
+            foreach (var t in customTargets)
             {
                 sb.AppendLine($"""
 <tr>
-  <td class="right rank">{rank++}</td>
+  <td class="right rank">{r++}</td>
   <td class="orange"><strong>{Esc(t.Name)}</strong></td>
   <td class="muted">{Esc(t.ProjectName)}</td>
   <td class="right"><strong>{Esc(ConsoleReportRenderer.FormatDuration(t.SelfTime))}</strong></td>

@@ -9,85 +9,134 @@ public static class JsonReportExporter
 {
     public static void Export(BuildReport report, string outputPath, BuildAnalysis? analysis = null)
     {
-        var dto = new JsonReportDto
-        {
-            Project = report.ProjectOrSolutionPath,
-            Succeeded = report.Succeeded,
-            StartTime = report.StartTime,
-            EndTime = report.EndTime,
-            WallClock = ConsoleReportRenderer.FormatDuration(report.TotalDuration),
-            WallClockMs = (long)report.TotalDuration.TotalMilliseconds,
-            ErrorCount = report.ErrorCount,
-            WarningCount = report.WarningCount,
-            Context = new JsonBuildContextDto
-            {
-                Configuration = report.Context.Configuration,
-                SdkVersion = report.Context.SdkVersion,
-                MSBuildVersion = report.Context.MSBuildVersion,
-                OperatingSystem = report.Context.OperatingSystem,
-                Parallelism = report.Context.Parallelism,
-                RestoreObserved = report.Context.RestoreObserved,
-                ExecutedTargetCount = report.ExecutedTargetCount,
-                SkippedTargetCount = report.SkippedTargetCount,
-            },
-            Projects = report
-                .Projects.Select(p => new JsonProjectDto
-                {
-                    Name = p.Name,
-                    FullPath = p.FullPath,
-                    SelfTimeMs = (long)p.SelfTime.TotalMilliseconds,
-                    SelfTime = ConsoleReportRenderer.FormatDuration(p.SelfTime),
-                    SpanMs = (long)p.Span.TotalMilliseconds,
-                    Span = ConsoleReportRenderer.FormatDuration(p.Span),
-                    SelfPercent = Math.Round(p.SelfPercent, 2),
-                    Succeeded = p.Succeeded,
-                    ErrorCount = p.ErrorCount,
-                    WarningCount = p.WarningCount,
-                    Targets = p.Targets.Count == 0 ? null : p.Targets.Select(ToTargetDto).ToList(),
-                })
-                .ToList(),
-            TopTargets = report.TopTargets.Select(ToTargetDto).ToList(),
-            PotentiallyCustomTargets = report.PotentiallyCustomTargets.Select(ToTargetDto).ToList(),
-            CategoryTotals = report.CategoryTotals.ToDictionary(
-                kv => kv.Key.ToString(),
-                kv => (long)kv.Value.TotalMilliseconds),
-            CriticalPath = report.CriticalPath.Select(p => new JsonCriticalPathNodeDto
-            {
-                Name = p.Name,
-                FullPath = p.FullPath,
-                SelfTimeMs = (long)p.SelfTime.TotalMilliseconds,
-                SelfTime = ConsoleReportRenderer.FormatDuration(p.SelfTime),
-            }).ToList(),
-            CriticalPathTotalMs = (long)report.CriticalPathTotal.TotalMilliseconds,
-            CriticalPathTotal = ConsoleReportRenderer.FormatDuration(report.CriticalPathTotal),
-            Analysis = analysis is not null
-                ? new JsonAnalysisDto
-                {
-                    Findings = analysis
-                        .Findings.Select(f => new JsonFindingDto
-                        {
-                            Number = f.Number,
-                            Severity = f.Severity.ToString().ToLowerInvariant(),
-                            Title = f.Title,
-                            Detail = f.Detail,
-                            Evidence = f.Evidence,
-                            Threshold = f.ThresholdName,
-                        })
-                        .ToList(),
-                    Recommendations = analysis
-                        .Recommendations.Select(r => new JsonRecommendationDto
-                        {
-                            Number = r.Number,
-                            Text = r.Text,
-                        })
-                        .ToList(),
-                }
-                : null,
-        };
-
+        var dto = BuildDto(report, analysis);
         var json = JsonSerializer.Serialize(dto, JsonExportContext.Default.JsonReportDto);
         File.WriteAllText(outputPath, json, System.Text.Encoding.UTF8);
     }
+
+    private static JsonReportDto BuildDto(BuildReport report, BuildAnalysis? analysis) => new()
+    {
+        Project = report.ProjectOrSolutionPath,
+        Succeeded = report.Succeeded,
+        StartTime = report.StartTime,
+        EndTime = report.EndTime,
+        WallClock = ConsoleReportRenderer.FormatDuration(report.TotalDuration),
+        WallClockMs = (long)report.TotalDuration.TotalMilliseconds,
+        ErrorCount = report.ErrorCount,
+        WarningCount = report.WarningCount,
+        AttributedWarningCount = report.AttributedWarningCount,
+        UnattributedWarningCount = report.UnattributedWarningCount,
+        Context = new JsonBuildContextDto
+        {
+            Configuration = report.Context.Configuration,
+            SdkVersion = report.Context.SdkVersion,
+            MSBuildVersion = report.Context.MSBuildVersion,
+            OperatingSystem = report.Context.OperatingSystem,
+            Parallelism = report.Context.Parallelism,
+            RestoreObserved = report.Context.RestoreObserved,
+            ExecutedTargetCount = report.ExecutedTargetCount,
+            SkippedTargetCount = report.SkippedTargetCount,
+        },
+        Projects = report.Projects.Select(ToProjectDto).ToList(),
+        TopTargets = report.TopTargets.Select(ToTargetDto).ToList(),
+        PotentiallyCustomTargets = report.PotentiallyCustomTargets.Select(ToTargetDto).ToList(),
+        CategoryTotals = report.CategoryTotals.ToDictionary(
+            kv => kv.Key.ToString(),
+            kv => (long)kv.Value.TotalMilliseconds),
+        ReferenceOverhead = report.ReferenceOverhead is { } o ? new JsonReferenceOverheadDto
+        {
+            TotalSelfTimeMs = (long)o.TotalSelfTime.TotalMilliseconds,
+            TotalSelfTime = ConsoleReportRenderer.FormatDuration(o.TotalSelfTime),
+            SelfPercent = Math.Round(o.SelfPercent, 2),
+            PayingProjectsCount = o.PayingProjectsCount,
+            TotalProjectsCount = o.TotalProjectsCount,
+            PayingProjectsPercent = Math.Round(o.PayingProjectsPercent, 2),
+            MedianPerPayingProjectMs = (long)o.MedianPerPayingProject.TotalMilliseconds,
+            MedianPerPayingProject = ConsoleReportRenderer.FormatDuration(o.MedianPerPayingProject),
+            TopProjects = o.TopProjects.Select(p => new JsonReferenceOverheadProjectDto
+            {
+                Name = p.ProjectName,
+                SelfTimeMs = (long)p.SelfTime.TotalMilliseconds,
+                SelfTime = ConsoleReportRenderer.FormatDuration(p.SelfTime),
+            }).ToList(),
+        } : null,
+        SpanOutliers = report.SpanOutliers.Select(p => new JsonSpanOutlierDto
+        {
+            Name = p.Name,
+            FullPath = p.FullPath,
+            SpanMs = (long)p.Span.TotalMilliseconds,
+            Span = ConsoleReportRenderer.FormatDuration(p.Span),
+            SelfTimeMs = (long)p.SelfTime.TotalMilliseconds,
+            SelfTime = ConsoleReportRenderer.FormatDuration(p.SelfTime),
+            Ratio = p.SelfTime.TotalMilliseconds > 0
+                ? Math.Round(p.Span.TotalMilliseconds / p.SelfTime.TotalMilliseconds, 2)
+                : 0,
+        }).ToList(),
+        Graph = new JsonDependencyGraphDto
+        {
+            Health = new JsonGraphHealthDto
+            {
+                TotalProjects = report.Graph.Health.TotalProjects,
+                TotalEdges = report.Graph.Health.TotalEdges,
+                IsolatedNodes = report.Graph.Health.IsolatedNodes,
+                NodesWithOutgoing = report.Graph.Health.NodesWithOutgoing,
+                NodesWithIncoming = report.Graph.Health.NodesWithIncoming,
+            },
+            IsUsable = report.Graph.IsUsable,
+            LongestChainProjectCount = report.Graph.LongestChainProjectCount,
+            TopHubs = report.Graph.TopHubs.Select(h => new JsonGraphNodeDto
+            {
+                Name = h.ProjectName,
+                FullPath = h.FullPath,
+                OutgoingCount = h.OutgoingCount,
+                IncomingCount = h.IncomingCount,
+            }).ToList(),
+            Cycles = report.Graph.Cycles.Select(c => c.ToList()).ToList(),
+        },
+        CriticalPath = report.CriticalPath.Select(p => new JsonCriticalPathNodeDto
+        {
+            Name = p.Name,
+            FullPath = p.FullPath,
+            SelfTimeMs = (long)p.SelfTime.TotalMilliseconds,
+            SelfTime = ConsoleReportRenderer.FormatDuration(p.SelfTime),
+        }).ToList(),
+        CriticalPathTotalMs = (long)report.CriticalPathTotal.TotalMilliseconds,
+        CriticalPathTotal = ConsoleReportRenderer.FormatDuration(report.CriticalPathTotal),
+        Analysis = analysis is not null
+            ? new JsonAnalysisDto
+            {
+                Findings = analysis.Findings.Select(f => new JsonFindingDto
+                {
+                    Number = f.Number,
+                    Severity = f.Severity.ToString().ToLowerInvariant(),
+                    Title = f.Title,
+                    Detail = f.Detail,
+                    Evidence = f.Evidence,
+                    Threshold = f.ThresholdName,
+                }).ToList(),
+                Recommendations = analysis.Recommendations.Select(r => new JsonRecommendationDto
+                {
+                    Number = r.Number,
+                    Text = r.Text,
+                }).ToList(),
+            }
+            : null,
+    };
+
+    private static JsonProjectDto ToProjectDto(ProjectTiming p) => new()
+    {
+        Name = p.Name,
+        FullPath = p.FullPath,
+        SelfTimeMs = (long)p.SelfTime.TotalMilliseconds,
+        SelfTime = ConsoleReportRenderer.FormatDuration(p.SelfTime),
+        SpanMs = (long)p.Span.TotalMilliseconds,
+        Span = ConsoleReportRenderer.FormatDuration(p.Span),
+        SelfPercent = Math.Round(p.SelfPercent, 2),
+        Succeeded = p.Succeeded,
+        ErrorCount = p.ErrorCount,
+        WarningCount = p.WarningCount,
+        Targets = p.Targets.Count == 0 ? null : p.Targets.Select(ToTargetDto).ToList(),
+    };
 
     private static JsonTargetDto ToTargetDto(TargetTiming t) => new()
     {
@@ -118,11 +167,16 @@ internal sealed class JsonReportDto
     public required long WallClockMs { get; init; }
     public required int ErrorCount { get; init; }
     public required int WarningCount { get; init; }
+    public required int AttributedWarningCount { get; init; }
+    public required int UnattributedWarningCount { get; init; }
     public required JsonBuildContextDto Context { get; init; }
     public required List<JsonProjectDto> Projects { get; init; }
     public required List<JsonTargetDto> TopTargets { get; init; }
     public required List<JsonTargetDto> PotentiallyCustomTargets { get; init; }
     public required Dictionary<string, long> CategoryTotals { get; init; }
+    public JsonReferenceOverheadDto? ReferenceOverhead { get; init; }
+    public required List<JsonSpanOutlierDto> SpanOutliers { get; init; }
+    public required JsonDependencyGraphDto Graph { get; init; }
     public required List<JsonCriticalPathNodeDto> CriticalPath { get; init; }
     public required long CriticalPathTotalMs { get; init; }
     public required string CriticalPathTotal { get; init; }
@@ -164,6 +218,63 @@ internal sealed class JsonTargetDto
     public required string SelfTime { get; init; }
     public required double SelfPercent { get; init; }
     public required string Category { get; init; }
+}
+
+internal sealed class JsonReferenceOverheadDto
+{
+    public required long TotalSelfTimeMs { get; init; }
+    public required string TotalSelfTime { get; init; }
+    public required double SelfPercent { get; init; }
+    public required int PayingProjectsCount { get; init; }
+    public required int TotalProjectsCount { get; init; }
+    public required double PayingProjectsPercent { get; init; }
+    public required long MedianPerPayingProjectMs { get; init; }
+    public required string MedianPerPayingProject { get; init; }
+    public required List<JsonReferenceOverheadProjectDto> TopProjects { get; init; }
+}
+
+internal sealed class JsonReferenceOverheadProjectDto
+{
+    public required string Name { get; init; }
+    public required long SelfTimeMs { get; init; }
+    public required string SelfTime { get; init; }
+}
+
+internal sealed class JsonSpanOutlierDto
+{
+    public required string Name { get; init; }
+    public required string FullPath { get; init; }
+    public required long SpanMs { get; init; }
+    public required string Span { get; init; }
+    public required long SelfTimeMs { get; init; }
+    public required string SelfTime { get; init; }
+    public required double Ratio { get; init; }
+}
+
+internal sealed class JsonDependencyGraphDto
+{
+    public required JsonGraphHealthDto Health { get; init; }
+    public required bool IsUsable { get; init; }
+    public required int LongestChainProjectCount { get; init; }
+    public required List<JsonGraphNodeDto> TopHubs { get; init; }
+    public required List<List<string>> Cycles { get; init; }
+}
+
+internal sealed class JsonGraphHealthDto
+{
+    public required int TotalProjects { get; init; }
+    public required int TotalEdges { get; init; }
+    public required int IsolatedNodes { get; init; }
+    public required int NodesWithOutgoing { get; init; }
+    public required int NodesWithIncoming { get; init; }
+}
+
+internal sealed class JsonGraphNodeDto
+{
+    public required string Name { get; init; }
+    public required string FullPath { get; init; }
+    public required int OutgoingCount { get; init; }
+    public required int IncomingCount { get; init; }
 }
 
 internal sealed class JsonCriticalPathNodeDto

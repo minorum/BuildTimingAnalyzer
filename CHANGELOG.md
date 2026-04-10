@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.0.8
+
+Graph-level insights release. The report now surfaces solution-shape cost, not just local
+hotspots. Fixes a broken critical path and a warning accounting bug.
+
+### Trust fixes
+- **Warning reconciliation**: the report now tracks attributed vs unattributed warnings
+  separately. Summary shows `X total (Y attributed, Z unattributed)`. Findings explicitly
+  say "attributed warnings" when discussing source breakdowns. Totals always reconcile.
+- **Fixed dependency DAG extraction**: v0.0.7 used `ProjectStartedEventArgs.ParentProjectBuildEventContext`
+  which in solution builds points to the solution metaproject, not project references. This made
+  the DAG shallow and the critical path almost always a single node. v0.0.8 extracts real project
+  references from `ProjectEvaluationFinishedEventArgs.Items` (`ProjectReference` item type), with
+  `ProjectStartedEventArgs.Items` as a fallback.
+- **Hard rule: invalid critical path never leaks into presentation**. If the graph has too few
+  edges or CPM validation fails, the critical path section, timeline highlighting, projects-table
+  markers, and all critical-path findings are suppressed together.
+
+### New: Dependency Graph Health
+- Total projects / edges / isolated nodes / nodes with outgoing / incoming
+- Longest chain by project count
+- Explicit warning when extraction produced too few edges (helps catch broken extraction early)
+
+### New: Dependency Hubs
+- Top projects by fan-in (referenced by the most projects) + fan-out
+- Helps identify structural bottlenecks that block downstream scheduling
+
+### New: Dependency Cycle Detection
+- DFS-based cycle detection with explicit reporting
+- Silence is no longer acceptable — if no cycles exist, nothing is shown (the finding is only rendered when cycles are found)
+
+### New: Self Time by Category
+- Aggregate self time per category across all projects
+- The data was already computed in v0.0.7 but not rendered; now it is
+- Shown as a dedicated table with bars
+
+### New: Reference Overhead
+- Aggregated reference-related self time across the solution
+- Total, % of self, paying-projects count + pct, median per paying project, top 10
+- Answers "how much is my solution paying for repeated reference resolution?"
+
+### New: Span vs Self Outliers
+- Projects where wall-clock span is much longer than local work
+- Rule: Span ≥ 5s, SelfTime > 0, Span/SelfTime ≥ 5x, Span − SelfTime ≥ 3s
+- Highlights projects that are waiting on the graph rather than doing heavy local work
+
+### New: Evidence-driven findings
+- **"Reference-related build work appears to be systemic, not isolated"**: fires when reference
+  overhead is ≥ 10% of self time, paid by ≥ 50% of projects, with median ≥ 250ms per paying project
+- **"N project(s) have long span relative to low self time"**: fires when ≥ 3 span outliers match the rule above
+- All existing findings continue to cite concrete metrics and named threshold constants
+
+### Demoted
+- **Potentially Custom Targets** now only shows entries with self time ≥ 1s, capped at 5 rows.
+  No more noisy lists of tiny SDK plumbing targets.
+- Expanded the `TargetCategorizer` SDK pattern list to correctly bin more targets
+  (`GenerateGlobalUsings`, `PrepareForBuild`, `ResolveFrameworkReferences`, etc.)
+
 ## 0.0.7
 
 Trust and interpretability overhaul — the report now tells you exactly what every

@@ -9,18 +9,60 @@ public static class ConsoleReportRenderer
         RenderSummary(report);
         Console.WriteLine();
         RenderBuildContext(report);
+
+        if (report.Graph.Nodes.Count > 0)
+        {
+            Console.WriteLine();
+            RenderGraphHealth(report);
+
+            if (report.Graph.TopHubs.Count > 0)
+            {
+                Console.WriteLine();
+                RenderDependencyHubs(report);
+            }
+
+            if (report.Graph.Cycles.Count > 0)
+            {
+                Console.WriteLine();
+                RenderCycles(report);
+            }
+        }
+
+        // Critical path — hard rule: only render if non-empty (validation passed)
         if (report.CriticalPath.Count > 0)
         {
             Console.WriteLine();
             RenderCriticalPath(report);
         }
+
+        if (report.CategoryTotals.Count > 0)
+        {
+            Console.WriteLine();
+            RenderCategoryTotals(report);
+        }
+
+        if (report.ReferenceOverhead is not null)
+        {
+            Console.WriteLine();
+            RenderReferenceOverhead(report);
+        }
+
+        if (report.SpanOutliers.Count > 0)
+        {
+            Console.WriteLine();
+            RenderSpanOutliers(report);
+        }
+
         Console.WriteLine();
         RenderTimeline(report);
         Console.WriteLine();
         RenderProjectsTable(report, topN);
         Console.WriteLine();
         RenderTargetsTable(report);
-        if (report.PotentiallyCustomTargets.Count > 0)
+
+        // Demoted: only if something non-trivial is there
+        var showCustom = report.PotentiallyCustomTargets.Any(t => t.SelfTime.TotalSeconds >= 1);
+        if (showCustom)
         {
             Console.WriteLine();
             RenderPotentiallyCustomTargets(report);
@@ -46,7 +88,7 @@ public static class ConsoleReportRenderer
         Console.WriteLine($"  Started    {report.StartTime:HH:mm:ss}");
         Console.WriteLine($"  Wall Clock {FormatDuration(report.TotalDuration)}");
         Console.WriteLine($"  Errors     {report.ErrorCount}");
-        Console.WriteLine($"  Warnings   {report.WarningCount}");
+        Console.WriteLine($"  Warnings   {report.WarningCount} total  ({report.AttributedWarningCount} attributed, {report.UnattributedWarningCount} unattributed)");
         Console.WriteLine($"  Projects   {report.Projects.Count}");
     }
 
@@ -76,6 +118,60 @@ public static class ConsoleReportRenderer
             Console.WriteLine($"  {label.PadRight(labelWidth)}  {value}");
     }
 
+    // ──────────────────────────── Graph Health ─────────────────────────
+
+    private static void RenderGraphHealth(BuildReport report)
+    {
+        var h = report.Graph.Health;
+        Console.WriteLine("  Dependency Graph Health");
+        Console.WriteLine();
+        Console.WriteLine($"  Total projects          {h.TotalProjects}");
+        Console.WriteLine($"  Total edges             {h.TotalEdges}");
+        Console.WriteLine($"  Nodes with outgoing     {h.NodesWithOutgoing}");
+        Console.WriteLine($"  Nodes with incoming     {h.NodesWithIncoming}");
+        Console.WriteLine($"  Isolated nodes          {h.IsolatedNodes}");
+        Console.WriteLine($"  Longest chain           {report.Graph.LongestChainProjectCount} projects");
+
+        if (!report.Graph.IsUsable)
+        {
+            Console.WriteLine();
+            Console.WriteLine("  Note: graph has too few edges to be usable for critical path analysis.");
+            Console.WriteLine("  Check whether ProjectReference extraction captured your project references correctly.");
+        }
+    }
+
+    // ──────────────────────────── Dependency Hubs ─────────────────────
+
+    private static void RenderDependencyHubs(BuildReport report)
+    {
+        Console.WriteLine("  Dependency Hubs (top by fan-in)");
+        Console.WriteLine();
+
+        var nameWidth = Math.Max(7, report.Graph.TopHubs.Max(h => h.ProjectName.Length));
+        nameWidth = Math.Min(nameWidth, 35);
+
+        Console.WriteLine($"  {"#",-4} {"Project".PadRight(nameWidth)}  {"Referenced by",14}  {"References",11}");
+        Console.WriteLine($"  {new string('-', 4)} {new string('-', nameWidth)}  {new string('-', 14)}  {new string('-', 11)}");
+
+        int rank = 1;
+        foreach (var h in report.Graph.TopHubs.Take(10))
+        {
+            var name = Truncate(h.ProjectName, nameWidth);
+            Console.WriteLine($"  {rank,-4} {name.PadRight(nameWidth)}  {h.IncomingCount,14}  {h.OutgoingCount,11}");
+            rank++;
+        }
+    }
+
+    // ──────────────────────────── Cycles ────────────────────────────
+
+    private static void RenderCycles(BuildReport report)
+    {
+        Console.WriteLine("  Dependency Cycles Detected");
+        Console.WriteLine();
+        foreach (var cycle in report.Graph.Cycles.Take(5))
+            Console.WriteLine($"  {string.Join(" -> ", cycle)} -> {cycle[0]}");
+    }
+
     // ──────────────────────────── Critical Path ────────────────────────────
 
     private static void RenderCriticalPath(BuildReport report)
@@ -100,13 +196,90 @@ public static class ConsoleReportRenderer
         Console.WriteLine($"  Path total: {FormatDuration(report.CriticalPathTotal)} of {FormatDuration(report.TotalDuration)} wall clock");
     }
 
+    // ──────────────────────────── Category Totals ────────────────────
+
+    private static void RenderCategoryTotals(BuildReport report)
+    {
+        var totalSelfMs = report.CategoryTotals.Sum(kv => kv.Value.TotalMilliseconds);
+        if (totalSelfMs <= 0) return;
+
+        Console.WriteLine("  Self Time by Category");
+        Console.WriteLine();
+
+        var rows = report.CategoryTotals
+            .OrderByDescending(kv => kv.Value)
+            .Select(kv => (
+                Category: CategoryLabel(kv.Key),
+                Self: kv.Value,
+                Pct: kv.Value.TotalMilliseconds / totalSelfMs * 100))
+            .ToList();
+
+        var catWidth = Math.Max(8, rows.Max(r => r.Category.Length));
+
+        Console.WriteLine($"  {"Category".PadRight(catWidth)}  {"Self Time",10}  {"% Self",8}");
+        Console.WriteLine($"  {new string('-', catWidth)}  {new string('-', 10)}  {new string('-', 8)}");
+        foreach (var r in rows)
+            Console.WriteLine($"  {r.Category.PadRight(catWidth)}  {FormatDuration(r.Self),10}  {r.Pct,7:F1}%");
+    }
+
+    // ──────────────────────────── Reference Overhead ────────────────
+
+    private static void RenderReferenceOverhead(BuildReport report)
+    {
+        var o = report.ReferenceOverhead!;
+        Console.WriteLine("  Reference Overhead (aggregated across solution)");
+        Console.WriteLine();
+        Console.WriteLine($"  Total self time in reference work   {FormatDuration(o.TotalSelfTime)}");
+        Console.WriteLine($"  Share of total self time            {o.SelfPercent:F1}%");
+        Console.WriteLine($"  Projects paying the cost            {o.PayingProjectsCount} of {o.TotalProjectsCount} ({o.PayingProjectsPercent:F0}%)");
+        Console.WriteLine($"  Median per paying project           {FormatDuration(o.MedianPerPayingProject)}");
+
+        if (o.TopProjects.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("  Top projects by reference overhead:");
+            foreach (var p in o.TopProjects.Take(5))
+                Console.WriteLine($"    {p.ProjectName,-35}  {FormatDuration(p.SelfTime),10}");
+        }
+    }
+
+    // ──────────────────────────── Span Outliers ────────────────────
+
+    private static void RenderSpanOutliers(BuildReport report)
+    {
+        Console.WriteLine("  Span vs Self Outliers (projects waiting on the graph)");
+        Console.WriteLine("  Rule: Span >= 5s, Span/SelfTime >= 5x, Span - SelfTime >= 3s");
+        Console.WriteLine();
+
+        var rows = report.SpanOutliers.ToList();
+        var nameWidth = Math.Max(7, rows.Max(p => p.Name.Length));
+        nameWidth = Math.Min(nameWidth, 35);
+
+        Console.WriteLine($"  {"#",-4} {"Project".PadRight(nameWidth)}  {"Span",10}  {"Self Time",10}  {"Ratio",8}");
+        Console.WriteLine($"  {new string('-', 4)} {new string('-', nameWidth)}  {new string('-', 10)}  {new string('-', 10)}  {new string('-', 8)}");
+
+        int rank = 1;
+        foreach (var p in rows)
+        {
+            var ratio = p.SelfTime.TotalMilliseconds > 0 ? p.Span.TotalMilliseconds / p.SelfTime.TotalMilliseconds : 0;
+            var name = Truncate(p.Name, nameWidth);
+            Console.WriteLine($"  {rank,-4} {name.PadRight(nameWidth)}  {FormatDuration(p.Span),10}  {FormatDuration(p.SelfTime),10}  {ratio,7:F1}x");
+            rank++;
+        }
+    }
+
     // ──────────────────────────── Timeline ─────────────────────────────
 
     private static void RenderTimeline(BuildReport report)
     {
         if (report.Projects.Count == 0) return;
 
-        Console.WriteLine("  Build Timeline (wall-clock Span per project, * = on critical path)");
+        var hasCritical = report.CriticalPath.Count > 0;
+        var header = hasCritical
+            ? "  Build Timeline (wall-clock Span per project, * = on critical path)"
+            : "  Build Timeline (wall-clock Span per project)";
+
+        Console.WriteLine(header);
         Console.WriteLine();
 
         var totalMs = report.TotalDuration.TotalMilliseconds;
@@ -121,9 +294,8 @@ public static class ConsoleReportRenderer
         var nameWidth = Math.Max(7, projects.Max(p => p.Name.Length));
         nameWidth = Math.Min(nameWidth, 25);
         const int barWidth = 50;
-        var pad = new string(' ', nameWidth + 2); // 2 extra for " *" marker space
+        var pad = new string(' ', nameWidth + 2);
 
-        // Time axis
         var tickCount = 5;
         var tickSpacing = barWidth / (tickCount - 1);
         var labels = new string[tickCount];
@@ -161,7 +333,7 @@ public static class ConsoleReportRenderer
             startPos = Math.Clamp(startPos, 0, barWidth - 1);
             endPos = Math.Clamp(endPos, startPos + 1, barWidth);
 
-            var onCritical = criticalSet.Contains(p.FullPath);
+            var onCritical = hasCritical && criticalSet.Contains(p.FullPath);
             var barChar = onCritical ? '#' : '.';
 
             var bar = new char[barWidth];
@@ -170,7 +342,7 @@ public static class ConsoleReportRenderer
                 bar[i] = barChar;
 
             var name = Truncate(p.Name, nameWidth);
-            var marker = onCritical ? "*" : " ";
+            var marker = hasCritical ? (onCritical ? "*" : " ") : " ";
             Console.WriteLine($"  {name.PadRight(nameWidth)} {marker} {new string(bar)}  {FormatDuration(p.Span)}");
         }
     }
@@ -185,10 +357,8 @@ public static class ConsoleReportRenderer
         Console.WriteLine("  Top Projects by Self Time");
         Console.WriteLine();
 
-        // Width must accommodate both project names and drilled-down target names
         var projectNameMax = projects.Max(p => p.Name.Length);
         var targetNameMax = projects.SelectMany(p => p.Targets).Select(t => t.Name.Length).DefaultIfEmpty(0).Max();
-        // Drill-down row uses "  -> <target>", so we need +4 for the prefix
         var nameWidth = Math.Max(7, Math.Max(projectNameMax, targetNameMax + 4));
         nameWidth = Math.Min(nameWidth, 38);
 
@@ -204,7 +374,6 @@ public static class ConsoleReportRenderer
             Console.WriteLine($"  {rank,-4} {status}{name.PadRight(nameWidth - 1)}  {FormatDuration(p.SelfTime),10}  {FormatDuration(p.Span),10}  {p.SelfPercent,7:F1}%  {p.ErrorCount,4}  {p.WarningCount,4}");
             rank++;
 
-            // Inline drill-down for projects that have target data populated
             if (p.Targets.Count > 0)
             {
                 foreach (var t in p.Targets)
@@ -252,11 +421,14 @@ public static class ConsoleReportRenderer
 
     private static void RenderPotentiallyCustomTargets(BuildReport report)
     {
-        Console.WriteLine("  Potentially Custom Targets");
-        Console.WriteLine("  (Targets that did not match any known SDK pattern. Often actionable optimization hotspots — investigate.)");
-        Console.WriteLine();
+        var targets = report.PotentiallyCustomTargets
+            .Where(t => t.SelfTime.TotalSeconds >= 1)
+            .Take(5)
+            .ToList();
+        if (targets.Count == 0) return;
 
-        var targets = report.PotentiallyCustomTargets.Take(15).ToList();
+        Console.WriteLine("  Potentially Custom Targets (self time >= 1s)");
+        Console.WriteLine();
 
         var nameWidth = Math.Max(6, targets.Max(t => t.Name.Length));
         nameWidth = Math.Min(nameWidth, 35);

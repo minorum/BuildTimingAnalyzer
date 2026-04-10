@@ -9,17 +9,32 @@ public sealed record BuildReport
     public required bool Succeeded { get; init; }
     public required int ErrorCount { get; init; }
     public required int WarningCount { get; init; }
+    public required int AttributedWarningCount { get; init; }
+    public int UnattributedWarningCount => WarningCount - AttributedWarningCount;
+
     public required IReadOnlyList<ProjectTiming> Projects { get; init; }
     public required IReadOnlyList<TargetTiming> TopTargets { get; init; }
 
-    // Phase 2: build context & categorization
+    // Build context & incremental behavior
     public required BuildContext Context { get; init; }
-    public required IReadOnlyDictionary<TargetCategory, TimeSpan> CategoryTotals { get; init; }
     public required int ExecutedTargetCount { get; init; }
     public required int SkippedTargetCount { get; init; }
+
+    // Categorization
+    public required IReadOnlyDictionary<TargetCategory, TimeSpan> CategoryTotals { get; init; }
     public required IReadOnlyList<TargetTiming> PotentiallyCustomTargets { get; init; }
 
-    // Phase 3: critical path (empty if not computed or failed validation)
+    // Reference overhead
+    public required ReferenceOverheadStats? ReferenceOverhead { get; init; }
+
+    // Span-vs-self outliers (projects waiting on the graph)
+    public required IReadOnlyList<ProjectTiming> SpanOutliers { get; init; }
+
+    // Dependency graph (extracted from ProjectReference items)
+    public required DependencyGraph Graph { get; init; }
+
+    // Critical path — only populated if CPM validation passed AND the graph is usable.
+    // Empty list + zero total means: do not render critical path anywhere in the report.
     public required IReadOnlyList<ProjectTiming> CriticalPath { get; init; }
     public required TimeSpan CriticalPathTotal { get; init; }
 }
@@ -69,28 +84,16 @@ public sealed record TargetTiming
 /// </summary>
 public enum TargetCategory
 {
-    /// <summary>C# / VB compilation (CoreCompile, Compile).</summary>
     Compile,
-    /// <summary>Source generators (RunResolveSourceGenerators, etc.).</summary>
     SourceGen,
-    /// <summary>Static web assets pipeline (Blazor, Razor).</summary>
     StaticWebAssets,
-    /// <summary>File copies and output directory work.</summary>
     Copy,
-    /// <summary>NuGet restore and package resolution.</summary>
     Restore,
-    /// <summary>Reference resolution and framework handling.</summary>
     References,
-    /// <summary>Did not match any known SDK target pattern. May be user-defined, third-party, or an uncategorised SDK target.</summary>
     Uncategorized,
-    /// <summary>Internal MSBuild-prefixed targets (underscore prefix).</summary>
     Other,
 }
 
-/// <summary>
-/// Build run metadata captured from the binlog. Fields are nullable — a null field means the
-/// value was not reliably captured from this binlog and must not be displayed.
-/// </summary>
 public sealed record BuildContext
 {
     public string? Configuration { get; init; }
@@ -99,4 +102,58 @@ public sealed record BuildContext
     public string? OperatingSystem { get; init; }
     public int? Parallelism { get; init; }
     public bool? RestoreObserved { get; init; }
+}
+
+/// <summary>
+/// Aggregate reference-related cost across the whole solution. Null if the solution has no
+/// reference-category work or only a single project.
+/// </summary>
+public sealed record ReferenceOverheadStats
+{
+    public required TimeSpan TotalSelfTime { get; init; }
+    public required double SelfPercent { get; init; }
+    public required int PayingProjectsCount { get; init; }
+    public required int TotalProjectsCount { get; init; }
+    public required TimeSpan MedianPerPayingProject { get; init; }
+    public required IReadOnlyList<ReferenceOverheadProject> TopProjects { get; init; }
+    public double PayingProjectsPercent =>
+        TotalProjectsCount == 0 ? 0 : (double)PayingProjectsCount / TotalProjectsCount * 100;
+}
+
+public sealed record ReferenceOverheadProject
+{
+    public required string ProjectName { get; init; }
+    public required TimeSpan SelfTime { get; init; }
+}
+
+/// <summary>
+/// Project dependency graph extracted from ProjectReference items on ProjectStartedEventArgs.Items.
+/// </summary>
+public sealed record DependencyGraph
+{
+    public required DependencyGraphHealth Health { get; init; }
+    public required IReadOnlyList<ProjectGraphNode> Nodes { get; init; }
+    public required IReadOnlyList<ProjectGraphNode> TopHubs { get; init; }
+    public required int LongestChainProjectCount { get; init; }
+    public required IReadOnlyList<IReadOnlyList<string>> Cycles { get; init; }
+
+    /// <summary>True if the graph has enough structure to trust derived analyses like critical path.</summary>
+    public required bool IsUsable { get; init; }
+}
+
+public sealed record DependencyGraphHealth
+{
+    public required int TotalProjects { get; init; }
+    public required int TotalEdges { get; init; }
+    public required int IsolatedNodes { get; init; }
+    public required int NodesWithOutgoing { get; init; }
+    public required int NodesWithIncoming { get; init; }
+}
+
+public sealed record ProjectGraphNode
+{
+    public required string ProjectName { get; init; }
+    public required string FullPath { get; init; }
+    public required int OutgoingCount { get; init; }
+    public required int IncomingCount { get; init; }
 }

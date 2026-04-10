@@ -1,3 +1,4 @@
+using System.Collections;
 using BuildTimeAnalyzer.Models;
 using Microsoft.Build.Logging.StructuredLogger;
 
@@ -5,9 +6,12 @@ namespace BuildTimeAnalyzer.Services;
 
 public sealed class LogAnalyzer
 {
-    // Drill-down: how many projects get target breakdowns populated.
-    // Top N by SelfTime, plus anything on the critical path.
     private const int DrillDownTopN = 3;
+
+    // Span-vs-self outlier rule (matches the spec exactly)
+    private const double SpanOutlierMinSpanSeconds = 5.0;
+    private const double SpanOutlierMinRatio = 5.0;
+    private const double SpanOutlierMinGapSeconds = 3.0;
 
     private readonly int _topTargets;
 
@@ -16,10 +20,6 @@ public sealed class LogAnalyzer
         _topTargets = topTargets;
     }
 
-    /// <summary>
-    /// Parses the binary log file using a streaming API to avoid loading the entire tree into memory.
-    /// Computes exclusive (self) times by subtracting orchestration task (MSBuild/CallTarget) durations.
-    /// </summary>
     public System.Threading.Tasks.Task<BuildReport> AnalyzeAsync(string binLogPath, string projectOrSolutionPath, CancellationToken ct = default)
     {
         return System.Threading.Tasks.Task.Run(() => Analyze(binLogPath, projectOrSolutionPath), ct);
@@ -30,20 +30,17 @@ public sealed class LogAnalyzer
         var projectTimings = new Dictionary<int, ProjectAccumulator>(256);
         var targetTimings = new List<RawTargetTiming>(4096);
 
-        // Track orchestration task (MSBuild/CallTarget) durations per target.
-        // These tasks trigger child project builds; their time inflates the parent target duration.
+        // Orchestration task (MSBuild/CallTarget) handling
         var runningOrchTasks = new Dictionary<(int ProjectInstanceId, int TaskId), (int TargetId, DateTime StartTime)>();
         var orchTaskDurations = new Dictionary<(int ProjectInstanceId, int TargetId), TimeSpan>();
 
-        // Project-level dependency edges: child instance id → parent instance id (from ParentProjectBuildEventContext)
-        var parentByInstance = new Dictionary<int, int>(256);
+        // Raw edges: parent project full path → set of dependency full paths (resolved + normalized)
+        var rawEdges = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
 
-        // Executed vs skipped target counts (observed incremental behavior — no mode inference)
         int executedTargets = 0;
         int skippedTargets = 0;
         bool restoreObserved = false;
 
-        // Build context
         string? configuration = null;
         string? sdkVersion = null;
         string? msBuildVersion = null;
@@ -52,6 +49,7 @@ public sealed class LogAnalyzer
 
         int errorCount = 0;
         int warningCount = 0;
+        int attributedWarningCount = 0;
         DateTime buildStart = DateTime.MaxValue;
         DateTime buildEnd = DateTime.MinValue;
         bool succeeded = false;
@@ -78,26 +76,35 @@ public sealed class LogAnalyzer
                     {
                         var key = pse.BuildEventContext?.ProjectInstanceId ?? -1;
                         if (key < 0) break;
+                        var projectFile = pse.ProjectFile ?? "";
                         projectTimings.TryAdd(key, new ProjectAccumulator
                         {
-                            Name = Path.GetFileNameWithoutExtension(pse.ProjectFile ?? "Unknown"),
-                            FullPath = pse.ProjectFile ?? "",
+                            Name = Path.GetFileNameWithoutExtension(projectFile == "" ? "Unknown" : projectFile),
+                            FullPath = projectFile,
                             StartTime = pse.Timestamp,
                         });
 
-                        var parentId = pse.ParentProjectBuildEventContext?.ProjectInstanceId ?? -1;
-                        if (parentId >= 0 && parentId != key)
-                            parentByInstance.TryAdd(key, parentId);
+                        // Fallback item extraction — ProjectStartedEventArgs.Items is often null in binlogs,
+                        // the authoritative source is ProjectEvaluationFinishedEventArgs handled below.
+                        if (pse.Items is not null)
+                            ExtractProjectReferences(projectFile, pse.Items, rawEdges);
 
-                        // Capture configuration from the first project's global properties
                         if (configuration is null && pse.GlobalProperties is not null)
                         {
                             if (pse.GlobalProperties.TryGetValue("Configuration", out var cfg) && !string.IsNullOrEmpty(cfg))
                                 configuration = cfg;
                         }
-                        // Detect restore by target list
+
                         if (!restoreObserved && pse.TargetNames is string tn && tn.Contains("Restore", StringComparison.OrdinalIgnoreCase))
                             restoreObserved = true;
+                        break;
+                    }
+
+                case Microsoft.Build.Framework.ProjectEvaluationFinishedEventArgs pef:
+                    {
+                        // Primary source of ProjectReference items — always populated in modern binlogs
+                        if (pef.Items is not null && !string.IsNullOrEmpty(pef.ProjectFile))
+                            ExtractProjectReferences(pef.ProjectFile, pef.Items, rawEdges);
                         break;
                     }
 
@@ -190,13 +197,15 @@ public sealed class LogAnalyzer
                         var ctx = ((Microsoft.Build.Framework.BuildWarningEventArgs)record.Args).BuildEventContext;
                         var key = ctx?.ProjectInstanceId ?? -1;
                         if (key >= 0 && projectTimings.TryGetValue(key, out var acc))
+                        {
                             acc.WarningCount++;
+                            attributedWarningCount++;
+                        }
                     }
                     break;
             }
         }
 
-        // Guard against empty logs
         if (buildStart == DateTime.MaxValue) buildStart = DateTime.UtcNow;
         if (buildEnd == DateTime.MinValue) buildEnd = buildStart;
 
@@ -204,7 +213,6 @@ public sealed class LogAnalyzer
 
         // ── Compute exclusive target times ─────────────────────────────
         var completedTargets = targetTimings.Where(t => t.EndTime > t.StartTime).ToList();
-
         foreach (var t in completedTargets)
         {
             var orchKey = (t.ProjectInstanceId, t.Id);
@@ -213,11 +221,8 @@ public sealed class LogAnalyzer
             t.ExclusiveDuration = exclusive > TimeSpan.Zero ? exclusive : TimeSpan.Zero;
         }
 
-        // Sum of all self time across all targets — used as the denominator for % Self.
-        // This is distinct from wall-clock time (which can be shorter due to parallelism).
         var totalSelfMs = completedTargets.Sum(t => t.ExclusiveDuration.TotalMilliseconds);
 
-        // Per-project exclusive time
         var exclusiveProjectTimes = completedTargets
             .GroupBy(t => t.ProjectInstanceId)
             .ToDictionary(
@@ -225,7 +230,6 @@ public sealed class LogAnalyzer
                 g => TimeSpan.FromMilliseconds(g.Sum(t => t.ExclusiveDuration.TotalMilliseconds))
             );
 
-        // Work spans (first target start → last target end) per project path
         var instanceToPath = projectTimings.ToDictionary(kv => kv.Key, kv => kv.Value.FullPath);
         var projectWorkSpans = completedTargets
             .Where(t => t.ExclusiveDuration > TimeSpan.Zero)
@@ -239,7 +243,7 @@ public sealed class LogAnalyzer
                 )
             );
 
-        // ── Project list (no target breakdown yet) ─────────────────────
+        // ── Project list ────────────────────────────────────────────────
         var projectList = projectTimings
             .Where(kv => kv.Value.EndTime > kv.Value.StartTime)
             .Where(kv => !kv.Value.FullPath.EndsWith(".metaproj", StringComparison.OrdinalIgnoreCase) &&
@@ -271,7 +275,7 @@ public sealed class LogAnalyzer
             .OrderByDescending(p => p.SelfTime)
             .ToList();
 
-        // ── All target timings (deduped by name + project, keeping slowest) ──
+        // ── Target list + categories ───────────────────────────────────
         var allTargets = completedTargets
             .Where(t => t.ExclusiveDuration > TimeSpan.FromMilliseconds(1))
             .GroupBy(t => (t.Name, t.ProjectName))
@@ -292,7 +296,6 @@ public sealed class LogAnalyzer
 
         var topTargetList = allTargets.Take(_topTargets).ToList();
 
-        // Category totals (aggregate self time per category)
         var categoryTotals = allTargets
             .GroupBy(t => t.Category)
             .ToDictionary(
@@ -300,18 +303,41 @@ public sealed class LogAnalyzer
                 g => TimeSpan.FromMilliseconds(g.Sum(t => t.SelfTime.TotalMilliseconds))
             );
 
-        // Potentially custom targets — Uncategorized only, sorted by self time
         var potentiallyCustom = allTargets
             .Where(t => t.Category == TargetCategory.Uncategorized)
             .OrderByDescending(t => t.SelfTime)
             .ToList();
 
-        // ── Critical path ─────────────────────────────────────────────
-        // Build dependency edges by full path (deduping — multiple instances may map to same path pair)
-        var depsByPath = BuildDependencyEdgesByPath(parentByInstance, instanceToPath);
-        var (criticalPath, criticalTotal) = CriticalPathAnalyzer.Compute(projectList, depsByPath, wallClock);
+        // ── Reference overhead stats ───────────────────────────────────
+        var referenceOverhead = ComputeReferenceOverhead(allTargets, projectList);
 
-        // ── Drill-down: populate Targets for top-N and critical-path projects ──
+        // ── Span-vs-self outliers ──────────────────────────────────────
+        var spanOutliers = projectList
+            .Where(p =>
+                p.Span.TotalSeconds >= SpanOutlierMinSpanSeconds &&
+                p.SelfTime.TotalMilliseconds > 0 &&
+                p.Span.TotalMilliseconds / p.SelfTime.TotalMilliseconds >= SpanOutlierMinRatio &&
+                (p.Span - p.SelfTime).TotalSeconds >= SpanOutlierMinGapSeconds)
+            .OrderByDescending(p => p.Span.TotalMilliseconds / Math.Max(1, p.SelfTime.TotalMilliseconds))
+            .ToList();
+
+        // ── Dependency graph ───────────────────────────────────────────
+        var rawEdgesReadOnly = rawEdges.ToDictionary(
+            kv => kv.Key,
+            kv => (IReadOnlyList<string>)kv.Value.ToList(),
+            StringComparer.OrdinalIgnoreCase);
+        var graph = DependencyGraphAnalyzer.Build(projectList, rawEdgesReadOnly);
+        var depsMap = DependencyGraphAnalyzer.ToDependencyMap(projectList, rawEdgesReadOnly);
+
+        // ── Critical path — only if the graph is usable ────────────────
+        IReadOnlyList<ProjectTiming> criticalPath = [];
+        TimeSpan criticalPathTotal = TimeSpan.Zero;
+        if (graph.IsUsable)
+        {
+            (criticalPath, criticalPathTotal) = CriticalPathAnalyzer.Compute(projectList, depsMap, wallClock);
+        }
+
+        // ── Drill-down ─────────────────────────────────────────────────
         var drillDownPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var p in projectList.Take(DrillDownTopN)) drillDownPaths.Add(p.FullPath);
         foreach (var p in criticalPath) drillDownPaths.Add(p.FullPath);
@@ -329,7 +355,6 @@ public sealed class LogAnalyzer
                 if (!targetsByProjectName.TryGetValue(projectList[i].Name, out var targets)) continue;
                 projectList[i] = projectList[i] with { Targets = targets };
             }
-            // Also update criticalPath entries to reflect populated Targets
             criticalPath = criticalPath
                 .Select(cp => projectList.FirstOrDefault(p =>
                     string.Equals(p.FullPath, cp.FullPath, StringComparison.OrdinalIgnoreCase)) ?? cp)
@@ -344,6 +369,7 @@ public sealed class LogAnalyzer
             Succeeded = succeeded,
             ErrorCount = errorCount,
             WarningCount = warningCount,
+            AttributedWarningCount = attributedWarningCount,
             Projects = projectList,
             TopTargets = topTargetList,
             Context = new BuildContext
@@ -359,12 +385,119 @@ public sealed class LogAnalyzer
             ExecutedTargetCount = executedTargets,
             SkippedTargetCount = skippedTargets,
             PotentiallyCustomTargets = potentiallyCustom,
+            ReferenceOverhead = referenceOverhead,
+            SpanOutliers = spanOutliers,
+            Graph = graph,
             CriticalPath = criticalPath,
-            CriticalPathTotal = criticalTotal,
+            CriticalPathTotal = criticalPathTotal,
         };
     }
 
     // ──────────────────────────── helpers ────────────────────────────
+
+    private static void ExtractProjectReferences(
+        string projectFile,
+        IEnumerable items,
+        Dictionary<string, HashSet<string>> rawEdges)
+    {
+        if (string.IsNullOrEmpty(projectFile)) return;
+
+        string? projectDir;
+        string fromKey;
+        try
+        {
+            projectDir = Path.GetDirectoryName(projectFile);
+            fromKey = Path.GetFullPath(projectFile);
+        }
+        catch
+        {
+            return;
+        }
+        if (projectDir is null) return;
+
+        foreach (var raw in items)
+        {
+            // Items come through as DictionaryEntry(string itemType, ITaskItem item).
+            // Be defensive about alternative shapes some MSBuild versions use.
+            string? itemType = null;
+            Microsoft.Build.Framework.ITaskItem? item = null;
+
+            if (raw is DictionaryEntry entry)
+            {
+                itemType = entry.Key as string;
+                item = entry.Value as Microsoft.Build.Framework.ITaskItem;
+            }
+
+            if (itemType is null || item is null) continue;
+            if (!itemType.Equals("ProjectReference", StringComparison.Ordinal)) continue;
+
+            var spec = item.ItemSpec;
+            if (string.IsNullOrEmpty(spec)) continue;
+
+            string resolved;
+            try
+            {
+                resolved = Path.IsPathRooted(spec) ? spec : Path.Combine(projectDir, spec);
+                resolved = Path.GetFullPath(resolved);
+            }
+            catch
+            {
+                continue;
+            }
+
+            if (!rawEdges.TryGetValue(fromKey, out var set))
+            {
+                set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                rawEdges[fromKey] = set;
+            }
+            set.Add(resolved);
+        }
+    }
+
+    private static ReferenceOverheadStats? ComputeReferenceOverhead(
+        List<TargetTiming> allTargets,
+        List<ProjectTiming> projects)
+    {
+        if (projects.Count == 0) return null;
+
+        // Per-project reference self time (grouped by ProjectName)
+        var refByProject = allTargets
+            .Where(t => t.Category == TargetCategory.References)
+            .GroupBy(t => t.ProjectName, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                g => g.Key,
+                g => TimeSpan.FromMilliseconds(g.Sum(t => t.SelfTime.TotalMilliseconds)),
+                StringComparer.OrdinalIgnoreCase);
+
+        if (refByProject.Count == 0) return null;
+
+        var total = TimeSpan.FromMilliseconds(refByProject.Values.Sum(v => v.TotalMilliseconds));
+        if (total <= TimeSpan.Zero) return null;
+
+        var totalSelfMs = projects.Sum(p => p.SelfTime.TotalMilliseconds);
+        var pct = totalSelfMs > 0 ? total.TotalMilliseconds / totalSelfMs * 100 : 0;
+
+        var paying = refByProject.Values.Where(v => v > TimeSpan.Zero).ToList();
+        var median = paying.Count == 0
+            ? TimeSpan.Zero
+            : paying.OrderBy(v => v).ElementAt(paying.Count / 2);
+
+        var top = refByProject
+            .OrderByDescending(kv => kv.Value)
+            .Take(10)
+            .Select(kv => new ReferenceOverheadProject { ProjectName = kv.Key, SelfTime = kv.Value })
+            .ToList();
+
+        return new ReferenceOverheadStats
+        {
+            TotalSelfTime = total,
+            SelfPercent = pct,
+            PayingProjectsCount = paying.Count,
+            TotalProjectsCount = projects.Count,
+            MedianPerPayingProject = median,
+            TopProjects = top,
+        };
+    }
 
     private static void CaptureBuildContext(
         Microsoft.Build.Framework.BuildStartedEventArgs bse,
@@ -389,35 +522,6 @@ public sealed class LogAnalyzer
             configuration = cfg;
         if (env.TryGetValue("MSBuildNodeCount", out var nc) && int.TryParse(nc, out var p) && p > 0)
             parallelism = p;
-    }
-
-    private static IReadOnlyDictionary<string, IReadOnlyList<string>> BuildDependencyEdgesByPath(
-        Dictionary<int, int> parentByInstance,
-        Dictionary<int, string> instanceToPath)
-    {
-        // Parent (p) depends on Child (c): p → c means "p depends on c"
-        // We collect edges as parentPath → List<childPath>, deduping identical pairs.
-        var edges = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
-        foreach (var kv in parentByInstance)
-        {
-            var childId = kv.Key;
-            var parentId = kv.Value;
-            if (!instanceToPath.TryGetValue(childId, out var childPath)) continue;
-            if (!instanceToPath.TryGetValue(parentId, out var parentPath)) continue;
-            if (string.Equals(childPath, parentPath, StringComparison.OrdinalIgnoreCase)) continue;
-
-            if (!edges.TryGetValue(parentPath, out var set))
-            {
-                set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                edges[parentPath] = set;
-            }
-            set.Add(childPath);
-        }
-
-        return edges.ToDictionary(
-            kv => kv.Key,
-            kv => (IReadOnlyList<string>)kv.Value.ToList(),
-            StringComparer.OrdinalIgnoreCase);
     }
 
     private sealed class ProjectAccumulator

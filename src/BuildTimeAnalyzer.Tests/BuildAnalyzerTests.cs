@@ -23,6 +23,7 @@ public sealed class BuildAnalyzerTests
             Succeeded = true,
             ErrorCount = 0,
             WarningCount = warningCount,
+            AttributedWarningCount = warningCount,
             Projects = projects ?? [],
             TopTargets = targets ?? [],
             Context = new BuildContext(),
@@ -30,6 +31,9 @@ public sealed class BuildAnalyzerTests
             ExecutedTargetCount = 0,
             SkippedTargetCount = 0,
             PotentiallyCustomTargets = [],
+            ReferenceOverhead = null,
+            SpanOutliers = [],
+            Graph = TestDefaults.EmptyGraph((projects ?? []).Count),
             CriticalPath = criticalPath ?? [],
             CriticalPathTotal = criticalPathTotal ?? TimeSpan.Zero,
         };
@@ -312,5 +316,133 @@ public sealed class BuildAnalyzerTests
             await Assert.That(rec.Text.Contains("split", StringComparison.OrdinalIgnoreCase)).IsFalse();
             await Assert.That(rec.Text.Contains("refactor", StringComparison.OrdinalIgnoreCase)).IsFalse();
         }
+    }
+
+    // ──────────────────────── Reference overhead ──────────────────
+
+    [Test]
+    public async Task SystemicReferenceOverhead_FiresWhenAllThresholdsPass()
+    {
+        var projects = Enumerable.Range(1, 10)
+            .Select(i => CreateProject($"P{i}", 10, 10))
+            .ToList();
+        var report = CreateReport(projects: projects) with
+        {
+            ReferenceOverhead = new ReferenceOverheadStats
+            {
+                TotalSelfTime = TimeSpan.FromSeconds(15),    // 15% of 100s
+                SelfPercent = 15.0,                          // > 10%
+                PayingProjectsCount = 8,                     // 80% > 50%
+                TotalProjectsCount = 10,
+                MedianPerPayingProject = TimeSpan.FromMilliseconds(500), // > 250ms
+                TopProjects = [],
+            },
+        };
+
+        var result = BuildAnalyzer.Analyze(report);
+        var finding = result.Findings.FirstOrDefault(f => f.Title.Contains("Reference-related"));
+        await Assert.That(finding).IsNotNull();
+        await Assert.That(finding!.Severity).IsEqualTo(FindingSeverity.Warning);
+    }
+
+    [Test]
+    public async Task SystemicReferenceOverhead_DoesNotFireIfMedianTooSmall()
+    {
+        var projects = Enumerable.Range(1, 10)
+            .Select(i => CreateProject($"P{i}", 10, 10))
+            .ToList();
+        var report = CreateReport(projects: projects) with
+        {
+            ReferenceOverhead = new ReferenceOverheadStats
+            {
+                TotalSelfTime = TimeSpan.FromSeconds(15),
+                SelfPercent = 15.0,
+                PayingProjectsCount = 8,
+                TotalProjectsCount = 10,
+                MedianPerPayingProject = TimeSpan.FromMilliseconds(100), // below 250ms
+                TopProjects = [],
+            },
+        };
+
+        var result = BuildAnalyzer.Analyze(report);
+        await Assert.That(result.Findings.Any(f => f.Title.Contains("Reference-related"))).IsFalse();
+    }
+
+    [Test]
+    public async Task SystemicReferenceOverhead_DoesNotFireIfConcentrated()
+    {
+        var projects = Enumerable.Range(1, 10)
+            .Select(i => CreateProject($"P{i}", 10, 10))
+            .ToList();
+        var report = CreateReport(projects: projects) with
+        {
+            ReferenceOverhead = new ReferenceOverheadStats
+            {
+                TotalSelfTime = TimeSpan.FromSeconds(15),
+                SelfPercent = 15.0,
+                PayingProjectsCount = 3, // 30%, below 50% threshold
+                TotalProjectsCount = 10,
+                MedianPerPayingProject = TimeSpan.FromMilliseconds(500),
+                TopProjects = [],
+            },
+        };
+
+        var result = BuildAnalyzer.Analyze(report);
+        await Assert.That(result.Findings.Any(f => f.Title.Contains("Reference-related"))).IsFalse();
+    }
+
+    // ──────────────────────── Span outliers ──────────────────────
+
+    [Test]
+    public async Task SpanWaitingPattern_FiresWhenEnoughOutliers()
+    {
+        // 3 outlier projects
+        var outliers = new List<ProjectTiming>
+        {
+            CreateProject("O1", 1, 2) with { StartOffset = TimeSpan.Zero, EndOffset = TimeSpan.FromSeconds(10) },
+            CreateProject("O2", 1, 2) with { StartOffset = TimeSpan.Zero, EndOffset = TimeSpan.FromSeconds(12) },
+            CreateProject("O3", 1, 2) with { StartOffset = TimeSpan.Zero, EndOffset = TimeSpan.FromSeconds(8) },
+        };
+        var report = CreateReport(projects: outliers) with { SpanOutliers = outliers };
+
+        var result = BuildAnalyzer.Analyze(report);
+        var finding = result.Findings.FirstOrDefault(f => f.Title.Contains("long span relative"));
+        await Assert.That(finding).IsNotNull();
+    }
+
+    [Test]
+    public async Task SpanWaitingPattern_DoesNotFireForTooFewOutliers()
+    {
+        var outliers = new List<ProjectTiming>
+        {
+            CreateProject("O1", 1, 2) with { StartOffset = TimeSpan.Zero, EndOffset = TimeSpan.FromSeconds(10) },
+        };
+        var report = CreateReport(projects: outliers) with { SpanOutliers = outliers };
+
+        var result = BuildAnalyzer.Analyze(report);
+        await Assert.That(result.Findings.Any(f => f.Title.Contains("long span"))).IsFalse();
+    }
+
+    // ──────────────────────── Warning wording ────────────────────
+
+    [Test]
+    public async Task WarningFinding_ExplicitlyDistinguishesAttributedVsTotal()
+    {
+        // 30 warnings total, 25 attributed to a single project, 5 unattributed
+        var projects = new List<ProjectTiming>
+        {
+            CreateProject("Warn1", 10, 20, warningCount: 25),
+            CreateProject("Clean1", 10, 20),
+            CreateProject("Clean2", 10, 20),
+            CreateProject("Clean3", 10, 20),
+            CreateProject("Clean4", 10, 20),
+        };
+        var report = CreateReport(projects: projects, warningCount: 30) with { AttributedWarningCount = 25 };
+
+        var result = BuildAnalyzer.Analyze(report);
+        var finding = result.Findings.FirstOrDefault(f => f.Title.Contains("Attributed warnings"));
+        await Assert.That(finding).IsNotNull();
+        await Assert.That(finding!.Detail).Contains("attributed");
+        await Assert.That(finding.Detail).Contains("5 could not be attributed");
     }
 }

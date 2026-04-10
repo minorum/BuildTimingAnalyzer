@@ -4,50 +4,36 @@ using BuildTimeAnalyzer.Rendering;
 namespace BuildTimeAnalyzer.Services;
 
 /// <summary>
-/// Evidence-driven analysis.
-///
-/// Every finding must:
-///   1. Cite the concrete metric that triggered it (e.g. "SelfTime=28.35s, 34.9% of total self time")
-///   2. Reference the named constant threshold that was crossed
-///   3. Phrase its recommendation as an investigation — never a structural conclusion
-///
-/// Thresholds are static named constants, not config, percentiles, or runtime tuning. Every finding
-/// names the constant it compared against so a reader can trace "why was this flagged" back to code.
+/// Evidence-driven analysis. Every finding cites a concrete metric and a named threshold
+/// constant. Recommendations are investigation targets only — never structural conclusions
+/// from timing data alone.
 /// </summary>
 public static class BuildAnalyzer
 {
     // ── Named thresholds ─────────────────────────────────────────────
-    // Each constant is named so findings can cite which rule fired.
 
-    /// <summary>Project self-time share (%) that triggers a critical bottleneck finding.</summary>
     private const double BottleneckCriticalPct = 25.0;
-
-    /// <summary>Project self-time share (%) that triggers a warning-level bottleneck finding.</summary>
     private const double BottleneckWarningPct = 15.0;
-
-    /// <summary>Ratio between #1 project self-time and #2 that triggers a critical disproportion finding.</summary>
     private const double DisproportionCriticalRatio = 2.5;
-
-    /// <summary>Ratio between #1 project self-time and #2 that triggers a warning-level disproportion finding.</summary>
     private const double DisproportionWarningRatio = 1.8;
 
-    /// <summary>Outlier multiplier: target self-time vs median for its target name.</summary>
     private const double OutlierTargetMedianMultiplier = 4.0;
-
-    /// <summary>Outlier targets below this duration are ignored (seconds).</summary>
     private const double OutlierTargetMinSeconds = 2.0;
 
-    /// <summary>ResolvePackageAssets self-time (seconds) that triggers a finding.</summary>
     private const double CostlyResolvePackageAssetsSeconds = 3.0;
 
-    /// <summary>Minimum warnings for concentration finding.</summary>
     private const int WarningsMinForFinding = 20;
-
-    /// <summary>Share of projects holding warnings, at or below which concentration is flagged.</summary>
     private const double WarningConcentrationRatio = 0.30;
 
-    /// <summary>Total self-time share (%) on critical path that triggers a finding.</summary>
     private const double CriticalPathMinInterestingPct = 30.0;
+
+    // Reference overhead — strict "systemic, not isolated" thresholds
+    private const double ReferenceSelfPctMin = 10.0;
+    private const double PayingProjectsPctMin = 50.0;
+    private const double MedianReferencePerPayingProjectMinMs = 250.0;
+
+    // Span-vs-self waiting pattern — fire when multiple projects match the outlier rule
+    private const int SpanOutliersMinCountForFinding = 3;
 
     public static BuildAnalysis Analyze(BuildReport report)
     {
@@ -63,6 +49,8 @@ public static class BuildAnalyzer
         DetectOutlierTargets(report, findings);
         DetectCostlyResolvePackageAssets(report, findings);
         DetectWarningConcentration(report, findings);
+        DetectSystemicReferenceOverhead(report, findings);
+        DetectSpanWaitingPattern(report, findings);
         DetectCriticalPathConcentration(report, totalSelfMs, findings);
 
         for (int i = 0; i < findings.Count; i++)
@@ -212,28 +200,79 @@ public static class BuildAnalyzer
 
         if (!isConcentrated) return;
 
-        // Reconciliation: top-N sources + remaining must sum to total attributed-to-project warnings
         var attributedTotal = projectsWithWarnings.Sum(p => p.WarningCount);
         var topN = Math.Min(5, projectsWithWarnings.Count);
         var topWarnings = projectsWithWarnings.Take(topN).Sum(p => p.WarningCount);
-        var remaining = attributedTotal - topWarnings;
+        var remainingAttributed = attributedTotal - topWarnings;
 
         var topList = string.Join(", ",
             projectsWithWarnings.Take(topN).Select(p => $"{p.Name} ({p.WarningCount})"));
 
+        // Finding explicitly labels its scope as "attributed" — does not imply the full warning total
+        var detail = $"Top {topN} attributed sources: {topList}. Other attributed projects: {remainingAttributed}. " +
+                     $"Total attributed: {attributedTotal} of {report.WarningCount} warnings " +
+                     $"({report.UnattributedWarningCount} could not be attributed to a specific project). " +
+                     $"Concentrated attributed warnings are easier to fix than scattered ones — investigate the top sources.";
+
         findings.Add(new AnalysisFinding
         {
             Number = 0,
-            Title = $"Warnings are concentrated in {projectsWithWarnings.Count} of {report.Projects.Count} projects",
-            Detail = $"Top {topN}: {topList}. Remaining: {remaining}. Total attributed: {attributedTotal}. Investigate the top sources — concentrated warnings are easier to fix than scattered ones.",
+            Title = $"Attributed warnings are concentrated in {projectsWithWarnings.Count} of {report.Projects.Count} projects",
+            Detail = detail,
             Severity = FindingSeverity.Info,
             Evidence = $"ProjectsWithWarnings={projectsWithWarnings.Count}, TotalProjects={report.Projects.Count}, ConcentrationRatio={concentrationRatio:F2}",
             ThresholdName = $"{nameof(WarningConcentrationRatio)}={WarningConcentrationRatio:F2}",
         });
     }
 
+    private static void DetectSystemicReferenceOverhead(BuildReport report, List<AnalysisFinding> findings)
+    {
+        var overhead = report.ReferenceOverhead;
+        if (overhead is null) return;
+
+        // Strict "systemic, not isolated" — all three thresholds must hold
+        if (overhead.SelfPercent < ReferenceSelfPctMin) return;
+        if (overhead.PayingProjectsPercent < PayingProjectsPctMin) return;
+        if (overhead.MedianPerPayingProject.TotalMilliseconds < MedianReferencePerPayingProjectMinMs) return;
+
+        findings.Add(new AnalysisFinding
+        {
+            Number = 0,
+            Title = "Reference-related build work appears to be systemic, not isolated",
+            Detail = $"Reference-category targets (ResolveAssemblyReferences, ProcessFrameworkReferences, _HandlePackageFileConflicts, etc.) account for "
+                   + $"{overhead.SelfPercent:F1}% of total self time ({Fmt(overhead.TotalSelfTime)}) across "
+                   + $"{overhead.PayingProjectsCount} of {overhead.TotalProjectsCount} projects "
+                   + $"(median {Fmt(overhead.MedianPerPayingProject)} per paying project). "
+                   + "Investigate whether the solution's project count and dependency graph are causing repeated reference-resolution overhead across many small projects.",
+            Severity = FindingSeverity.Warning,
+            Evidence = $"ReferenceSelfPct={overhead.SelfPercent:F1}%, PayingProjectsPct={overhead.PayingProjectsPercent:F0}%, MedianPerPaying={Fmt(overhead.MedianPerPayingProject)}",
+            ThresholdName = $"{nameof(ReferenceSelfPctMin)}={ReferenceSelfPctMin:F0}%, {nameof(PayingProjectsPctMin)}={PayingProjectsPctMin:F0}%, {nameof(MedianReferencePerPayingProjectMinMs)}={MedianReferencePerPayingProjectMinMs:F0}ms",
+        });
+    }
+
+    private static void DetectSpanWaitingPattern(BuildReport report, List<AnalysisFinding> findings)
+    {
+        if (report.SpanOutliers.Count < SpanOutliersMinCountForFinding) return;
+
+        var examples = string.Join(", ",
+            report.SpanOutliers.Take(4).Select(p => $"{p.Name} (span {Fmt(p.Span)}, self {Fmt(p.SelfTime)})"));
+
+        findings.Add(new AnalysisFinding
+        {
+            Number = 0,
+            Title = $"{report.SpanOutliers.Count} project(s) have long span relative to low self time",
+            Detail = $"These projects spent most of their wall-clock span waiting rather than doing local work: {examples}. "
+                   + "That pattern suggests waiting on dependencies, graph scheduling, or repeated framework/reference work rather than heavy project-local execution. "
+                   + "Investigate solution topology and dependency fan-out.",
+            Severity = FindingSeverity.Warning,
+            Evidence = $"OutlierCount={report.SpanOutliers.Count}, Rules: Span>=5s, Span/SelfTime>=5x, Span-SelfTime>=3s",
+            ThresholdName = $"{nameof(SpanOutliersMinCountForFinding)}={SpanOutliersMinCountForFinding}",
+        });
+    }
+
     private static void DetectCriticalPathConcentration(BuildReport report, double totalSelfMs, List<AnalysisFinding> findings)
     {
+        // Hard rule: no critical path findings if validation failed (empty path).
         if (report.CriticalPath.Count == 0 || totalSelfMs <= 0) return;
 
         var cpSelfMs = report.CriticalPath.Sum(p => p.SelfTime.TotalMilliseconds);
@@ -256,7 +295,7 @@ public static class BuildAnalyzer
     }
 
     // ──────────────────────── Recommendations ──────────────────────
-    // Hard rule: every recommendation is an investigation target, never a structural conclusion.
+    // Hard rule: investigation-first language. No architectural conclusions from timing data alone.
 
     private static IReadOnlyList<AnalysisRecommendation> GenerateRecommendations(
         List<AnalysisFinding> findings, BuildReport report)
@@ -304,6 +343,22 @@ public static class BuildAnalyzer
                 {
                     Number = 0,
                     Text = $"Investigate: {f.Title}. Compare against projects with similar target to find what differs (source generators, custom analyzers, file volume).",
+                });
+            }
+            else if (f.Title.Contains("Reference-related build work"))
+            {
+                recs.Add(new AnalysisRecommendation
+                {
+                    Number = 0,
+                    Text = "Investigate solution topology: check whether fan-out and project count are causing repeated reference-resolution across many small projects. Review the dependency graph section before restructuring.",
+                });
+            }
+            else if (f.Title.Contains("long span relative to low self time"))
+            {
+                recs.Add(new AnalysisRecommendation
+                {
+                    Number = 0,
+                    Text = "Investigate the dependency graph for the span-outlier projects. Look at their position in the DAG — they are likely waiting on upstream dependencies rather than doing heavy local work.",
                 });
             }
         }

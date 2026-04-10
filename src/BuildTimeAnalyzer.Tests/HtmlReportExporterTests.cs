@@ -29,6 +29,7 @@ public sealed class HtmlReportExporterTests
             Succeeded = succeeded,
             ErrorCount = succeeded ? 0 : 2,
             WarningCount = 3,
+            AttributedWarningCount = 3,
             Projects = [project],
             TopTargets = [],
             Context = new BuildContext { Configuration = "Release" },
@@ -36,6 +37,9 @@ public sealed class HtmlReportExporterTests
             ExecutedTargetCount = 10,
             SkippedTargetCount = 2,
             PotentiallyCustomTargets = [],
+            ReferenceOverhead = null,
+            SpanOutliers = [],
+            Graph = TestDefaults.EmptyGraph(1),
             CriticalPath = [],
             CriticalPathTotal = TimeSpan.Zero,
         };

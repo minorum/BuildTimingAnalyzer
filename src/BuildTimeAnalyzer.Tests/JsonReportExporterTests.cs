@@ -39,6 +39,7 @@ public sealed class JsonReportExporterTests
             Succeeded = true,
             ErrorCount = 0,
             WarningCount = 3,
+            AttributedWarningCount = 3,
             Projects = [project],
             TopTargets = [target],
             Context = new BuildContext { Configuration = "Debug" },
@@ -49,6 +50,9 @@ public sealed class JsonReportExporterTests
             ExecutedTargetCount = 5,
             SkippedTargetCount = 0,
             PotentiallyCustomTargets = [],
+            ReferenceOverhead = null,
+            SpanOutliers = [],
+            Graph = TestDefaults.EmptyGraph(1),
             CriticalPath = [],
             CriticalPathTotal = TimeSpan.Zero,
         };
