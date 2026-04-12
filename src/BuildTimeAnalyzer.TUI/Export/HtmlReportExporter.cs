@@ -264,6 +264,28 @@ public static class HtmlReportExporter
             }
         }
 
+        // Analyzer / Generator Reports
+        if (report.AnalyzerReports.Count > 0)
+        {
+            sb.AppendLine("<h2>Analyzer &amp; Generator Timing</h2>");
+            sb.AppendLine("<p class=\"note\">Per-project breakdown from -p:ReportAnalyzer=true. Times are CPU-summed (may exceed Csc wall time on multi-core). Compiler-proper time ≈ Csc wall − max(analyzer, generator) — approximate due to concurrency.</p>");
+            sb.AppendLine("<table><thead><tr><th>Project</th><th class=\"right\">Csc Wall</th><th class=\"right\">Analyzer Time</th><th class=\"right\">Generator Time</th><th class=\"right\">Analyzers</th><th class=\"right\">Generators</th></tr></thead><tbody>");
+            foreach (var ar in report.AnalyzerReports.OrderByDescending(a => a.TotalAnalyzerTime + a.TotalGeneratorTime))
+            {
+                sb.AppendLine($"""
+<tr>
+  <td>{Esc(ar.ProjectName)}</td>
+  <td class="right">{Esc(ConsoleReportRenderer.FormatDuration(ar.CscWallTime))}</td>
+  <td class="right {(ar.TotalAnalyzerTime.TotalSeconds > 1 ? "yellow" : "")}">{Esc(ConsoleReportRenderer.FormatDuration(ar.TotalAnalyzerTime))}</td>
+  <td class="right {(ar.TotalGeneratorTime.TotalSeconds > 1 ? "yellow" : "")}">{Esc(ConsoleReportRenderer.FormatDuration(ar.TotalGeneratorTime))}</td>
+  <td class="right muted">{ar.Analyzers.Count}</td>
+  <td class="right muted">{ar.Generators.Count}</td>
+</tr>
+""");
+            }
+            sb.AppendLine("</tbody></table>");
+        }
+
         // Reference overhead
         if (report.ReferenceOverhead is { } overhead)
         {
@@ -452,6 +474,28 @@ public static class HtmlReportExporter
         }
         sb.AppendLine("</tbody></table>");
 
+        // Project Diagnoses ("Why is this slow?")
+        if (report.ProjectDiagnoses.Count > 0)
+        {
+            sb.AppendLine("<h2>Why Is This Slow?</h2>");
+            sb.AppendLine("<p class=\"note\">Factual one-paragraph synthesis per top project. No interpretation beyond measured data.</p>");
+            sb.AppendLine("<div class=\"analysis\">");
+            foreach (var d in report.ProjectDiagnoses)
+            {
+                var badges = new List<string>();
+                if (d.OnCriticalPath) badges.Add("<span class=\"cat-badge cat-references\">critical path</span>");
+                if (d.IsSpanOutlier) badges.Add("<span class=\"cat-badge cat-uncategorized\">span outlier</span>");
+                var badgeHtml = badges.Count > 0 ? " " + string.Join(" ", badges) : "";
+                sb.AppendLine($"""
+<div class="finding severity-info" style="border-left-color:var(--cyan)">
+  <div><strong>{Esc(d.ProjectName)}</strong> — {Esc(ConsoleReportRenderer.FormatDuration(d.SelfTime))} ({d.SelfPercent:F1}%){badgeHtml}</div>
+  <div class="detail" style="margin-top:8px">{Esc(d.Summary)}</div>
+</div>
+""");
+            }
+            sb.AppendLine("</div>");
+        }
+
         // Targets table
         if (report.TopTargets.Count > 0)
         {
@@ -470,6 +514,28 @@ public static class HtmlReportExporter
   <td><span class="cat-badge cat-{t.Category.ToString().ToLowerInvariant()}">{Esc(CategoryLabel(t.Category))}</span></td>
   <td class="right"><strong>{Esc(ConsoleReportRenderer.FormatDuration(t.SelfTime))}</strong></td>
   <td class="right muted">{t.SelfPercent:F1}%</td>
+</tr>
+""");
+            }
+            sb.AppendLine("</tbody></table>");
+        }
+
+        // Top Tasks (task-level breakdown)
+        if (report.TopTasks.Count > 0)
+        {
+            sb.AppendLine("<h2>Top Tasks by Self Time</h2>");
+            sb.AppendLine("<p class=\"note\">Task-level drill-down below targets. Shows which tasks inside targets are doing the work.</p>");
+            sb.AppendLine("<table><thead><tr><th class=\"right\">#</th><th>Task</th><th>Target</th><th>Project</th><th class=\"right\">Self Time</th></tr></thead><tbody>");
+            int taskRank = 1;
+            foreach (var t in report.TopTasks.Take(20))
+            {
+                sb.AppendLine($"""
+<tr>
+  <td class="right rank">{taskRank++}</td>
+  <td><strong>{Esc(t.TaskName)}</strong></td>
+  <td class="muted">{Esc(t.TargetName)}</td>
+  <td class="muted">{Esc(t.ProjectName)}</td>
+  <td class="right"><strong>{Esc(ConsoleReportRenderer.FormatDuration(t.SelfTime))}</strong></td>
 </tr>
 """);
             }
@@ -520,7 +586,10 @@ public static class HtmlReportExporter
                 if (!string.IsNullOrEmpty(f.LikelyExplanation))
                     sb.AppendLine($"  <div class=\"layer layer-likely\"><span class=\"layer-label\">Likely</span><span class=\"layer-value\">{Esc(f.LikelyExplanation)}</span></div>");
                 sb.AppendLine($"  <div class=\"layer layer-investigate\"><span class=\"layer-label\">Investigate</span><span class=\"layer-value\">{Esc(f.InvestigationSuggestion)}</span></div>");
-                sb.AppendLine($"  <div class=\"evidence\">Evidence: {Esc(f.Evidence)} &nbsp; · &nbsp; Threshold: {Esc(f.ThresholdName)}</div>");
+                var confLabel = f.Confidence switch { FindingConfidence.High => "high", FindingConfidence.Medium => "medium", _ => "low" };
+                var confColor = f.Confidence switch { FindingConfidence.High => "green", FindingConfidence.Medium => "yellow", _ => "muted" };
+                var impactText = f.UpperBoundImpactPercent is { } pct ? $" &nbsp; · &nbsp; Upper bound: up to {pct:F1}% of total self time" : "";
+                sb.AppendLine($"  <div class=\"evidence\">Confidence: <span class=\"{confColor}\">{confLabel}</span>{impactText} &nbsp; · &nbsp; Evidence: {Esc(f.Evidence)} &nbsp; · &nbsp; Threshold: {Esc(f.ThresholdName)}</div>");
                 sb.AppendLine("</div>");
             }
 

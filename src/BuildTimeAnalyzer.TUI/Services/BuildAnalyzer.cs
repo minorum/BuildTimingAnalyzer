@@ -98,11 +98,13 @@ public static class BuildAnalyzer
             Number = 0,
             Title = $"Largest self-time share: {top.Name}",
             Severity = severity,
+            Confidence = FindingConfidence.High,
             Measured = $"{top.Name} accounts for {top.SelfPercent:F1}% of total self time ({Fmt(top.SelfTime)}).{targetPhrase}",
             LikelyExplanation = null,
             InvestigationSuggestion = $"Profile {top.Name}'s top targets before deciding whether anything needs to change.",
             Evidence = $"SelfPercent={top.SelfPercent:F1}%, SelfTime={Fmt(top.SelfTime)}",
             ThresholdName = $"{thresholdName}={thresholdValue:F0}%",
+            UpperBoundImpactPercent = top.SelfPercent,
         });
     }
 
@@ -128,11 +130,13 @@ public static class BuildAnalyzer
             Number = 0,
             Title = $"Largest self-time gap to next project: {first.Name}",
             Severity = severity,
+            Confidence = FindingConfidence.High,
             Measured = $"{first.Name} has {Fmt(first.SelfTime)} of self time; the next project ({second.Name}) has {Fmt(second.SelfTime)}. Ratio: {ratio:F1}x.",
             LikelyExplanation = null,
             InvestigationSuggestion = $"Review {first.Name}'s target breakdown to understand what is driving the gap.",
             Evidence = $"Ratio={ratio:F2}, First={Fmt(first.SelfTime)}, Second={Fmt(second.SelfTime)}",
             ThresholdName = $"{thresholdName}={thresholdValue:F1}x",
+            UpperBoundImpactPercent = first.SelfPercent,
         });
     }
 
@@ -162,6 +166,7 @@ public static class BuildAnalyzer
                     Number = 0,
                     Title = $"Target outlier: {outlier.Name} in {outlier.ProjectName}",
                     Severity = FindingSeverity.Warning,
+                    Confidence = FindingConfidence.High,
                     Measured = $"Median {outlier.Name} self time is {Fmt(median)}; {outlier.ProjectName} runs at {Fmt(outlier.SelfTime)} ({multiplier:F1}x median).",
                     LikelyExplanation = "A target running much slower than its median across projects often reflects different inputs — source generators, analyzers, or file volume specific to that project. The multiplier alone does not identify which.",
                     InvestigationSuggestion = $"Compare {outlier.ProjectName} against projects with similar {outlier.Name} runtime to find what differs.",
@@ -187,6 +192,8 @@ public static class BuildAnalyzer
             Number = 0,
             Title = $"Expensive ResolvePackageAssets: {costly.Count} project(s)",
             Severity = FindingSeverity.Warning,
+            Confidence = FindingConfidence.High,
+            UpperBoundImpactPercent = costly.Sum(c => c.SelfPercent),
             Measured = $"{costly.Count} project(s) cross the {CostlyResolvePackageAssetsSeconds:F0}s threshold. Slowest: {max.ProjectName} at {Fmt(max.SelfTime)}.",
             LikelyExplanation = "ResolvePackageAssets cost typically scales with the transitive NuGet graph size, but this is a correlation — not proof. High cost does not directly identify which packages are responsible.",
             InvestigationSuggestion = "Run `dotnet nuget why` on heavy packages in the affected projects to locate transitive chains.",
@@ -222,6 +229,7 @@ public static class BuildAnalyzer
             Number = 0,
             Title = $"Attributed warnings are concentrated in {projectsWithWarnings.Count} of {report.Projects.Count} projects",
             Severity = FindingSeverity.Info,
+            Confidence = FindingConfidence.High,
             Measured = $"Of {report.WarningCount} total warnings, {report.AttributedWarningCount} are attributed to a specific project. " +
                        $"Top {topN} attributed sources: {topList}. Other attributed projects: {remainingAttributed}. " +
                        $"Unattributed: {report.UnattributedWarningCount}.",
@@ -246,6 +254,8 @@ public static class BuildAnalyzer
             Number = 0,
             Title = "Reference-related build work is broadly distributed",
             Severity = FindingSeverity.Warning,
+            Confidence = FindingConfidence.Medium,
+            UpperBoundImpactPercent = overhead.SelfPercent,
             Measured = $"Reference-category targets (ResolveAssemblyReferences, ProcessFrameworkReferences, _HandlePackageFileConflicts, etc.) " +
                        $"account for {overhead.SelfPercent:F1}% of total self time ({Fmt(overhead.TotalSelfTime)}), " +
                        $"paid by {overhead.PayingProjectsCount} of {overhead.TotalProjectsCount} projects " +
@@ -270,6 +280,7 @@ public static class BuildAnalyzer
             Number = 0,
             Title = $"{report.SpanOutliers.Count} project(s) have span >> self time",
             Severity = FindingSeverity.Warning,
+            Confidence = FindingConfidence.Low,
             Measured = $"{report.SpanOutliers.Count} project(s) match the outlier rule (Span ≥ 5s, Span/SelfTime ≥ 5x, Span − SelfTime ≥ 3s). Examples: {examples}.",
             LikelyExplanation = "This pattern has several possible causes and the report cannot distinguish between them from timing alone: " +
                                 "dependency waiting, SDK target orchestration, framework/reference work, static-web-assets pipelines, test/benchmark-specific build shape, or incremental-build effects.",
@@ -301,6 +312,7 @@ public static class BuildAnalyzer
             Number = 0,
             Title = $"Critical path estimate carries {cpPct:F1}% of total self time",
             Severity = FindingSeverity.Info,
+            Confidence = FindingConfidence.Medium,
             Measured = $"The CPM estimate contains {report.CriticalPath.Count} projects totalling {Fmt(report.CriticalPathTotal)}. Highest-cost nodes: {topThree}.{testBenchmarkNote}",
             LikelyExplanation = "The critical path is derived from the observed project-reference DAG and measured self times. It is a model estimate — not a scheduler trace — and is only as accurate as the extracted dependencies and exclusive timing model.",
             InvestigationSuggestion = "Treat the path as a candidate list for sequential-ordering investigation. Verify that the dependency extraction looks right (graph health section) before using it to prioritise work.",

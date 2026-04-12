@@ -23,6 +23,8 @@ public sealed class BuildRunner
             $"-c {configuration}",
             $"-bl:\"{binLogPath}\"",
             "-nologo",
+            "-p:ReportAnalyzer=true",
+            "-p:UseSharedCompilation=false",
         };
         if (!incremental) args.Add("--no-incremental");
         args.AddRange(extraArgs);
