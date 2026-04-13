@@ -424,71 +424,106 @@ public static class BuildAnalyzer
     {
         var recs = new List<AnalysisRecommendation>();
 
+        // Each finding contributes its own actionable recommendation. The dispatch is keyed
+        // on finding Title so adding a new finding + its recommendation stays co-located.
         foreach (var f in findings)
         {
             if (f.Severity == FindingSeverity.Info) continue;
-
-            if (f.Title.StartsWith("Largest self-time share"))
-            {
-                var top = report.Projects.FirstOrDefault();
-                if (top is null) continue;
-                var topTargets = top.Targets.Count > 0
-                    ? string.Join(", ", top.Targets.Take(3).Select(t => t.Name))
-                    : "its top targets";
-                recs.Add(new AnalysisRecommendation
-                {
-                    Number = 0,
-                    Text = $"Investigate {top.Name}: start with {topTargets}. Profile the targets holding most of the {Fmt(top.SelfTime)} of self time before deciding whether anything needs to change.",
-                });
-            }
-            else if (f.Title.StartsWith("Largest self-time gap"))
-            {
-                var top = report.Projects.FirstOrDefault();
-                if (top is null) continue;
-                recs.Add(new AnalysisRecommendation
-                {
-                    Number = 0,
-                    Text = $"Investigate {top.Name}'s target breakdown to understand the gap. Do not conclude structural changes are needed from timing data alone.",
-                });
-            }
-            else if (f.Title.Contains("ResolvePackageAssets"))
-            {
-                recs.Add(new AnalysisRecommendation
-                {
-                    Number = 0,
-                    Text = "Investigate NuGet dependency graphs for the affected projects. Run `dotnet nuget why` on heavy packages before changing references.",
-                });
-            }
-            else if (f.Title.StartsWith("Target outlier"))
-            {
-                recs.Add(new AnalysisRecommendation
-                {
-                    Number = 0,
-                    Text = $"Investigate: {f.Title}. Compare against projects with similar target runtime to find what differs (source generators, analyzers, file volume).",
-                });
-            }
-            else if (f.Title.StartsWith("Reference-related build work"))
-            {
-                recs.Add(new AnalysisRecommendation
-                {
-                    Number = 0,
-                    Text = "Investigate the dependency hubs, per-project category composition, and the Project Count Tax section together before concluding the solution shape is responsible.",
-                });
-            }
-            else if (f.Title.Contains("span >> self time"))
-            {
-                recs.Add(new AnalysisRecommendation
-                {
-                    Number = 0,
-                    Text = "Cross-reference the span outliers with the Dependency Hubs and per-project category composition. The pattern has several possible causes and needs the graph context to narrow down.",
-                });
-            }
+            var text = RecommendationFor(f, report);
+            if (text is not null)
+                recs.Add(new AnalysisRecommendation { Number = 0, Text = text });
         }
+
+        // Cross-finding rules (don't map 1:1 to a single finding).
+        foreach (var cross in CrossFindingRecommendations(findings, report))
+            recs.Add(new AnalysisRecommendation { Number = 0, Text = cross });
 
         for (int i = 0; i < recs.Count; i++)
             recs[i] = recs[i] with { Number = i + 1 };
 
         return recs;
+    }
+
+    private static string? RecommendationFor(AnalysisFinding f, BuildReport report)
+    {
+        if (f.Title.StartsWith("Build includes a clean phase"))
+        {
+            return "Remove --no-incremental from dev builds to measure steady-state cost. The tool defaults to --no-incremental for reproducibility, but day-to-day development builds should skip it — the clean phase is a separate cost story from the compile bottleneck.";
+        }
+        if (f.Title.StartsWith("_GetProjectReferenceTargetFrameworkProperties"))
+        {
+            return "Add `SkipGetTargetFrameworkProperties=\"true\"` to ProjectReferences that do not need TFM negotiation (automate via Directory.Build.targets for same-TFM projects). Also try `dotnet build -graph` to switch to static graph evaluation.";
+        }
+        if (f.Title.Contains("test/benchmark project") && f.Title.Contains("critical path"))
+        {
+            var names = string.Join(", ", report.CriticalPath
+                .Where(p => p.KindHeuristic == ProjectKind.Test || p.KindHeuristic == ProjectKind.Benchmark)
+                .Select(p => p.Name));
+            return $"Exclude {names} from default solution builds (Solution Configuration, .sln .Build.0 edit, or `<ExcludeFromBuild>` conditional in the csproj). Measure the wall-clock delta before committing — the DAG topology determines whether the leaf was actually gating anything.";
+        }
+        if (f.Title.StartsWith("Largest self-time share"))
+        {
+            var top = report.Projects.FirstOrDefault();
+            if (top is null) return null;
+            var topTargets = top.Targets.Count > 0
+                ? string.Join(", ", top.Targets.Take(3).Select(t => t.Name))
+                : "its top targets";
+            return $"Investigate {top.Name}: start with {topTargets}. Profile the targets holding most of the {Fmt(top.SelfTime)} of self time before deciding whether anything needs to change.";
+        }
+        if (f.Title.StartsWith("Largest self-time gap"))
+        {
+            var top = report.Projects.FirstOrDefault();
+            return top is null ? null :
+                $"Investigate {top.Name}'s target breakdown to understand the gap. Do not conclude structural changes are needed from timing data alone.";
+        }
+        if (f.Title.Contains("ResolvePackageAssets"))
+        {
+            return "Investigate NuGet dependency graphs for the affected projects. Run `dotnet nuget why <PackageId>` on heavy packages before changing references.";
+        }
+        if (f.Title.StartsWith("Target outlier"))
+        {
+            return $"Investigate: {f.Title}. Compare against projects with similar target runtime to find what differs (source generators, analyzers, file volume).";
+        }
+        if (f.Title.StartsWith("Reference-related build work"))
+        {
+            return "Investigate the dependency hubs, per-project category composition, and the Project Count Tax section together before concluding the solution shape is responsible.";
+        }
+        if (f.Title.Contains("span >> self time"))
+        {
+            return "Cross-reference the span outliers with the Dependency Hubs and per-project category composition. The pattern has several possible causes and needs the graph context to narrow down.";
+        }
+        return null;
+    }
+
+    private static IEnumerable<string> CrossFindingRecommendations(List<AnalysisFinding> findings, BuildReport report)
+    {
+        // Critical-path serial bottleneck — parallelism can't help unless the chain breaks.
+        if (report.CriticalPath.Count > 0 && report.TotalDuration.TotalMilliseconds > 0)
+        {
+            var cpRatio = report.CriticalPathTotal.TotalMilliseconds / report.TotalDuration.TotalMilliseconds;
+            if (cpRatio >= 0.70)
+                yield return $"Critical path is {cpRatio * 100:F0}% of wall clock — the build is essentially serial. Adding parallelism (-m:N, MSBuildNodeCount) cannot shorten wall time until a dependency in the chain is broken. Focus on shortening the path, not widening it.";
+        }
+
+        // Heavy generator packages (>10s solution-wide) → auditing hint.
+        if (report.AnalyzerReports.Count > 0)
+        {
+            var generatorsBySolution = report.AnalyzerReports
+                .SelectMany(r => r.Generators)
+                .GroupBy(e => e.AssemblyName)
+                .Select(g => new { Name = g.Key, Total = TimeSpan.FromMilliseconds(g.Sum(e => e.Time.TotalMilliseconds)) })
+                .OrderByDescending(x => x.Total)
+                .FirstOrDefault();
+            if (generatorsBySolution is { } top && top.Total.TotalSeconds >= 10)
+                yield return $"Top generator '{top.Name}' consumes {Fmt(top.Total)} solution-wide. Audit whether every referencing project actually uses it — source generators run in every project that references their package, even if no attributes are present in that project's source.";
+        }
+
+        // High warning volume — actionable breakdown path.
+        if (report.WarningCount >= 500 && report.WarningsByCode.Count > 0)
+        {
+            var top = report.WarningsByCode.First();
+            yield return $"High warning volume ({report.WarningCount} total). Top source: {top.Code} ({top.Count}). Fix the top code first — concentrated warnings are faster to clean up than scattered ones. Use `dotnet build /warnaserror:{top.Code}` on a branch to turn the top code into errors and force the fix.";
+        }
     }
 
     private static string Fmt(TimeSpan ts) => ConsoleReportRenderer.FormatDuration(ts);
