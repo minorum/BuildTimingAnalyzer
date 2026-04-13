@@ -51,6 +51,7 @@ public sealed class LogAnalyzer
         var allRawTasks = new List<RawTaskTiming>(8192);
         // Active Csc/Vbc tasks for collecting ReportAnalyzer messages
         var activeCscTasks = new Dictionary<(int ProjectInstanceId, int TaskId), CscTaskAccumulator>();
+        var completedCscTasks = new List<CscTaskAccumulator>();
         // Target skip reasons
         var skipInfos = new List<TargetSkipInfo>();
 
@@ -279,11 +280,12 @@ public sealed class LogAnalyzer
                         }
                     }
 
-                    // Close Csc/Vbc task accumulator
+                    // Close Csc/Vbc task accumulator and move to completed list
                     if (taskFe.TaskName is "Csc" or "Vbc" &&
-                        activeCscTasks.TryGetValue(taskKey, out var cscAcc))
+                        activeCscTasks.Remove(taskKey, out var cscAcc))
                     {
                         cscAcc.EndTime = taskFe.Timestamp;
+                        completedCscTasks.Add(cscAcc);
                     }
                     break;
                 }
@@ -546,25 +548,28 @@ public sealed class LogAnalyzer
         foreach (var t in targetTimings)
             targetNameLookup.TryAdd((t.ProjectInstanceId, t.Id), t.Name);
 
-        var taskTimingList = allRawTasks
-            .Where(t => t.EndTime > t.StartTime)
+        var completedTasks = allRawTasks.Where(t => t.EndTime > t.StartTime).ToList();
+        var totalTaskMs = completedTasks.Sum(t => t.Duration.TotalMilliseconds);
+
+        var taskTimingList = completedTasks
             .Select(t => new TaskTiming
             {
                 TaskName = t.Name,
                 TargetName = targetNameLookup.GetValueOrDefault((t.ProjectInstanceId, t.TargetId), "Unknown"),
                 ProjectName = t.ProjectName,
                 SelfTime = t.Duration,
-                SelfPercent = totalSelfMs > 0 ? t.Duration.TotalMilliseconds / totalSelfMs * 100 : 0,
+                SelfPercent = totalTaskMs > 0 ? t.Duration.TotalMilliseconds / totalTaskMs * 100 : 0,
             })
             .OrderByDescending(t => t.SelfTime)
             .ToList();
         var topTaskList = taskTimingList.Take(30).ToList();
 
         // ── Analyzer reports (from ReportAnalyzer output in Csc messages) ──
+        // Also drain any still-active tasks (task finish event may have been missing)
+        completedCscTasks.AddRange(activeCscTasks.Values);
         var analyzerReports = new List<AnalyzerReport>();
-        foreach (var kv in activeCscTasks)
+        foreach (var acc in completedCscTasks)
         {
-            var acc = kv.Value;
             if (acc.Messages.Count == 0) continue;
             var cscWallTime = acc.EndTime > acc.StartTime ? acc.EndTime - acc.StartTime : TimeSpan.Zero;
             var report = AnalyzerReportParser.Parse(acc.ProjectName, cscWallTime, acc.Messages);

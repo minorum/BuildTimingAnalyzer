@@ -167,6 +167,7 @@ public static class BuildAnalyzer
                     Title = $"Target outlier: {outlier.Name} in {outlier.ProjectName}",
                     Severity = FindingSeverity.Warning,
                     Confidence = FindingConfidence.High,
+                    UpperBoundImpactPercent = outlier.SelfPercent,
                     Measured = $"Median {outlier.Name} self time is {Fmt(median)}; {outlier.ProjectName} runs at {Fmt(outlier.SelfTime)} ({multiplier:F1}x median).",
                     LikelyExplanation = "A target running much slower than its median across projects often reflects different inputs — source generators, analyzers, or file volume specific to that project. The multiplier alone does not identify which.",
                     InvestigationSuggestion = $"Compare {outlier.ProjectName} against projects with similar {outlier.Name} runtime to find what differs.",

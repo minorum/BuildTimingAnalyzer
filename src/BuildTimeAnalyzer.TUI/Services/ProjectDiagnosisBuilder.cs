@@ -22,8 +22,9 @@ public static class ProjectDiagnosisBuilder
             criticalPath.Select(p => p.FullPath), StringComparer.OrdinalIgnoreCase);
         var outlierSet = new HashSet<string>(
             spanOutliers.Select(p => p.FullPath), StringComparer.OrdinalIgnoreCase);
-        var analyzerByProject = analyzerReports
-            .ToDictionary(a => a.ProjectName, StringComparer.OrdinalIgnoreCase);
+        var analyzerByProject = new Dictionary<string, AnalyzerReport>(StringComparer.OrdinalIgnoreCase);
+        foreach (var ar in analyzerReports)
+            analyzerByProject[ar.ProjectName] = ar;
         var tasksByProject = topTasks
             .GroupBy(t => t.ProjectName, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(
@@ -104,7 +105,7 @@ public static class ProjectDiagnosisBuilder
             parts.Add("On the critical path estimate.");
 
         if (isOutlier)
-            parts.Add($"Span outlier: span {Fmt(p.Span)} vs self {Fmt(p.SelfTime)} — most wall-clock time is not local work.");
+            parts.Add($"Span outlier: span {Fmt(p.Span)} vs self {Fmt(p.SelfTime)}.");
 
         return string.Join(" ", parts);
     }

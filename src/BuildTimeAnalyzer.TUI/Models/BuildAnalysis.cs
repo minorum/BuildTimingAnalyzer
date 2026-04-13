@@ -15,6 +15,10 @@ public enum FindingConfidence { High, Medium, Low }
 ///   • <see cref="Measured"/>          — the raw counted facts only
 ///   • <see cref="LikelyExplanation"/> — a heuristic hypothesis, clearly tagged as such; may be null
 ///   • <see cref="InvestigationSuggestion"/> — a concrete next step, phrased as an investigation
+/// <para>
+/// Title and <see cref="Measured"/> must stay purely factual. Any interpretation belongs in
+/// <see cref="LikelyExplanation"/>. Recommendations must never appear in Measured.
+/// </para>
 /// </summary>
 public sealed record AnalysisFinding
 {

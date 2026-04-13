@@ -96,9 +96,9 @@ public static class AnalyzerReportParser
     private static AnalyzerEntry? ParseEntryLine(string line)
     {
         // "      10.123   82   Some.Assembly, Version=1.0.0.0, ..."
-        // Split by 2+ whitespace chunks, expect at least 3 parts
+        // Split by whitespace, expect at least 3 parts (time, percent, assembly name)
         var trimmed = line.Trim();
-        var parts = trimmed.Split(new[] { "  " }, 3, StringSplitOptions.RemoveEmptyEntries);
+        var parts = trimmed.Split((char[]?)null, 3, StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length < 3) return null;
 
         if (!double.TryParse(parts[0].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds))
