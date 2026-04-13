@@ -12,6 +12,25 @@ public sealed record BuildReport
     public required int AttributedWarningCount { get; init; }
     public int UnattributedWarningCount => WarningCount - AttributedWarningCount;
 
+    /// <summary>
+    /// Per-code warning tallies (e.g. CS8600 → 42). Built from BuildWarningEventArgs.Code
+    /// captured in the binlog — does not require the text build log. Empty when no warnings
+    /// carried a recognizable code.
+    /// </summary>
+    public required IReadOnlyList<WarningCodeTally> WarningsByCode { get; init; }
+
+    /// <summary>Prefix-keyed rollup of <see cref="WarningsByCode"/> (CS → 847, CA → 289 …).</summary>
+    public IReadOnlyDictionary<string, int> WarningsByPrefix =>
+        WarningsByCode
+            .GroupBy(t => t.Prefix)
+            .ToDictionary(g => g.Key, g => g.Sum(t => t.Count));
+
+    /// <summary>
+    /// Project names (short name) where at least one .cs file contains <c>[GeneratedComInterface]</c>.
+    /// Used to confirm whether ComInterfaceGenerator cost is no-op (empty list → no usages found).
+    /// </summary>
+    public required IReadOnlyList<string> GeneratedComInterfaceUsages { get; init; }
+
     public required IReadOnlyList<ProjectTiming> Projects { get; init; }
     public required IReadOnlyList<TargetTiming> TopTargets { get; init; }
 
@@ -35,6 +54,18 @@ public sealed record BuildReport
 
     // Dependency graph
     public required DependencyGraph Graph { get; init; }
+
+    // Task-level timing (all tasks, not just orchestration)
+    public required IReadOnlyList<TaskTiming> TopTasks { get; init; }
+
+    // Incremental build signal — per-target skip reasons
+    public required IReadOnlyList<TargetSkipInfo> SkipReasons { get; init; }
+
+    // Analyzer / generator timing (from -p:ReportAnalyzer=true output in binlog)
+    public required IReadOnlyList<AnalyzerReport> AnalyzerReports { get; init; }
+
+    // "Why is this slow?" synthesis per top project
+    public required IReadOnlyList<ProjectDiagnosis> ProjectDiagnoses { get; init; }
 
     // Critical path — only populated if validation passed AND the graph is usable
     public required IReadOnlyList<ProjectTiming> CriticalPath { get; init; }
@@ -233,4 +264,124 @@ public sealed record CriticalPathValidation
     public required bool Accepted { get; init; }
     public required string Reason { get; init; }
     public required bool GraphWasUsable { get; init; }
+}
+
+/// <summary>Per-task timing within a target. Enables drill-down below the target level.</summary>
+public sealed record TaskTiming
+{
+    public required string TaskName { get; init; }
+    public required string TargetName { get; init; }
+    public required string ProjectName { get; init; }
+    public required TimeSpan SelfTime { get; init; }
+    public double SelfPercent { get; init; }
+}
+
+/// <summary>
+/// Why a target was skipped. Captures MSBuild's TargetSkipReason for incremental build diagnosis.
+/// </summary>
+public sealed record TargetSkipInfo
+{
+    public required string TargetName { get; init; }
+    public required string ProjectName { get; init; }
+    public required string SkipReason { get; init; }
+    public string? Condition { get; init; }
+    public string? EvaluatedCondition { get; init; }
+}
+
+/// <summary>Aggregated skip-reason counts for the summary.</summary>
+public sealed record SkipReasonSummary
+{
+    public required string Reason { get; init; }
+    public required int Count { get; init; }
+}
+
+/// <summary>
+/// Per-project analyzer/generator timing extracted from ReportAnalyzer output in the binlog.
+/// Populated because we always build with -p:ReportAnalyzer=true.
+/// </summary>
+public sealed record AnalyzerReport
+{
+    public required string ProjectName { get; init; }
+    public required TimeSpan TotalAnalyzerTime { get; init; }
+    public required TimeSpan TotalGeneratorTime { get; init; }
+    public required TimeSpan CscWallTime { get; init; }
+    public required IReadOnlyList<AnalyzerEntry> Analyzers { get; init; }
+    public required IReadOnlyList<AnalyzerEntry> Generators { get; init; }
+}
+
+/// <summary>
+/// Tally of a single warning code (e.g. "CS8600") with its prefix category.
+/// Prefix groupings: CS (C# compiler), CA (Roslyn analyzers), IDE, NETSDK, NU (NuGet),
+/// MSB (MSBuild). The prefix is extracted by scanning leading letters from the code.
+/// </summary>
+public sealed record WarningCodeTally
+{
+    public required string Code { get; init; }
+    public required string Prefix { get; init; }
+    public required int Count { get; init; }
+}
+
+public sealed record AnalyzerEntry
+{
+    public required string AssemblyName { get; init; }
+    public required TimeSpan Time { get; init; }
+    public required double Percent { get; init; }
+}
+
+/// <summary>
+/// "Why is this slow?" synthesis for a single project. Pulls together task breakdown,
+/// category composition, analyzer/generator cost, graph position, and span/self pattern
+/// into one compact explanation.
+/// </summary>
+/// <summary>
+/// Quality of package/reference data attached to a project. Reflects what the resolver
+/// actually had access to on disk — the reader can judge the report accordingly.
+/// </summary>
+public enum ProjectDataQuality
+{
+    /// <summary>Both .csproj and obj/project.assets.json were parsed — direct + transitive data.</summary>
+    Full,
+    /// <summary>Only .csproj parsed — direct packages only, no transitive graph.</summary>
+    CsprojOnly,
+    /// <summary>No project data available. Nothing to display.</summary>
+    NoCsproj,
+}
+
+public enum PackageReferenceSource { Direct, Transitive, ProjectReference }
+
+public sealed record PackageRef
+{
+    public required string Id { get; init; }
+    public string? Version { get; init; }
+    public required PackageReferenceSource Source { get; init; }
+    /// <summary>For transitive packages, the direct-reference package that pulled this in (one-level walk).</summary>
+    public string? ParentPackage { get; init; }
+    public bool IsKnownHeavy { get; init; }
+}
+
+public sealed record ProjectPackages
+{
+    public required ProjectDataQuality Quality { get; init; }
+    public required IReadOnlyList<PackageRef> DirectPackages { get; init; }
+    public required IReadOnlyList<PackageRef> TransitivePackages { get; init; }
+    public required IReadOnlyList<string> ProjectReferences { get; init; }
+}
+
+public sealed record ProjectDiagnosis
+{
+    public required string ProjectName { get; init; }
+    public required TimeSpan SelfTime { get; init; }
+    public required double SelfPercent { get; init; }
+    public required string TopCategory { get; init; }
+    public required double TopCategoryPercent { get; init; }
+    public required string TopTask { get; init; }
+    public required TimeSpan TopTaskTime { get; init; }
+    public TimeSpan? AnalyzerTime { get; init; }
+    public TimeSpan? GeneratorTime { get; init; }
+    public bool OnCriticalPath { get; init; }
+    public bool IsSpanOutlier { get; init; }
+    /// <summary>Factual one-paragraph synthesis. No interpretation beyond measured data.</summary>
+    public required string Summary { get; init; }
+    /// <summary>Package and project references resolved from .csproj / project.assets.json. Null when no data was available.</summary>
+    public ProjectPackages? Packages { get; init; }
 }

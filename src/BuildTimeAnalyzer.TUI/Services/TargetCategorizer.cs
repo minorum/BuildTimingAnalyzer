@@ -64,6 +64,17 @@ public static class TargetCategorizer
         ("_HandlePackageFileConflicts",         MatchMode.StartsWith, TargetCategory.References),
         ("_GetProjectReferenceTarget",          MatchMode.StartsWith, TargetCategory.References),
 
+        // ── Clean / rebuild ────────────────────────────────────────
+        // Clean targets only run with --no-incremental or /t:Rebuild. They are SDK-standard,
+        // not custom — a rebuild detection finding surfaces their aggregate cost separately.
+        ("CoreClean",                           MatchMode.Exact,     TargetCategory.Other),
+        ("Clean",                               MatchMode.Exact,     TargetCategory.Other),
+        ("BeforeClean",                         MatchMode.Exact,     TargetCategory.Other),
+        ("AfterClean",                          MatchMode.Exact,     TargetCategory.Other),
+        ("CleanReferencedProjects",             MatchMode.Exact,     TargetCategory.Other),
+        ("CleanPublishFolder",                  MatchMode.Exact,     TargetCategory.Other),
+        ("_CleanRecordFileWrites",              MatchMode.StartsWith, TargetCategory.Other),
+
         // ── Internal SDK plumbing ───────────────────────────────────
         // These are well-known SDK targets that don't deserve to be surfaced as "potentially custom"
         ("PrepareForBuild",                     MatchMode.Exact,     TargetCategory.Other),

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using BuildTimeAnalyzer.Export;
 using BuildTimeAnalyzer.Models;
+using BuildTimeAnalyzer.Rendering;
 using BuildTimeAnalyzer.Services;
 
 namespace BuildTimeAnalyzer.Commands;
@@ -21,20 +22,58 @@ public static class BuildCommand
         Console.WriteLine();
 
         // ── 1. Run dotnet build with binary logging ─────────────────
-        Step("Running build with binary logging");
-        Console.WriteLine();
-
         var runner = new BuildRunner();
         var extra = settings.ExtraArgs?.Split(' ', StringSplitOptions.RemoveEmptyEntries)
                     ?? Array.Empty<string>();
 
-        var (exitCode, binLogPath) = await runner.RunAsync(
-            projectPath, settings.Configuration, settings.Incremental, extra, CancellationToken.None);
+        BuildRunResult buildResult;
+        var controller = new BuildOutputController();
+        var throbber = new Throbber("Running build with binary logging (Ctrl+E to toggle build output)");
+        controller.Toggled += isOn =>
+        {
+            if (isOn)
+            {
+                throbber.Pause();
+                Console.WriteLine();
+                Console.WriteLine("── build output (Ctrl+E to hide) ──");
+            }
+            else
+            {
+                Console.WriteLine("── build output hidden (Ctrl+E to show) ──");
+                throbber.Resume();
+            }
+        };
+        controller.StartListening();
+        try
+        {
+            buildResult = await runner.RunAsync(
+                projectPath, settings.Configuration, settings.Incremental,
+                controller, extra, CancellationToken.None);
+        }
+        finally
+        {
+            await controller.StopAsync();
+            await throbber.StopAsync();
+        }
+
+        var exitCode = buildResult.ExitCode;
+        var binLogPath = buildResult.BinLogPath;
+
+        if (exitCode != 0 && buildResult.CapturedOutputTail.Count > 0)
+        {
+            Console.Error.WriteLine();
+            Console.Error.WriteLine($"Build failed (exit {exitCode}). Last {buildResult.CapturedOutputTail.Count} line(s) of build output:");
+            foreach (var line in buildResult.CapturedOutputTail)
+                Console.Error.WriteLine($"  {line}");
+        }
 
         // ── 2. Parse the binary log ────────────────────────────────
-        Step("Parsing binary log");
-        var analyzer = new LogAnalyzer(settings.TopN);
-        var report = await analyzer.AnalyzeAsync(binLogPath, projectPath);
+        BuildReport? report;
+        await using (var t = new Throbber("Parsing binary log"))
+        {
+            var analyzer = new LogAnalyzer(settings.TopN);
+            report = await analyzer.AnalyzeAsync(binLogPath, projectPath);
+        }
 
         if (report is not { } finalReport)
         {
@@ -51,39 +90,49 @@ public static class BuildCommand
         };
 
         // ── 3. Run automated analysis ──────────────────────────────
-        var analysis = BuildAnalyzer.Analyze(finalReport);
+        BuildAnalysis analysis;
+        await using (var t = new Throbber($"Analysing {finalReport.Projects.Count} project(s)"))
+        {
+            analysis = BuildAnalyzer.Analyze(finalReport);
+        }
+
         var findingCount = analysis.Findings.Count;
         var criticalCount = analysis.Findings.Count(f => f.Severity == FindingSeverity.Critical);
-        Step($"Analysing: {finalReport.Projects.Count} project(s), {finalReport.Graph.Health.TotalEdges} dependency edge(s), {findingCount} finding(s){(criticalCount > 0 ? $" ({criticalCount} critical)" : "")}");
+        if (findingCount > 0)
+        {
+            var tag = criticalCount > 0 ? $"{findingCount} finding(s), {criticalCount} critical" : $"{findingCount} finding(s)";
+            Console.WriteLine($"    {tag}");
+        }
 
         // ── 4. Decide output format and path ───────────────────────
         var (outputPath, outputFormat) = ResolveOutputPath(settings);
 
-        Step($"Generating {outputFormat.ToUpperInvariant()} report");
-        switch (outputFormat)
+        await using (var t = new Throbber($"Generating {outputFormat.ToUpperInvariant()} report"))
         {
-            case "html":
-                HtmlReportExporter.Export(finalReport, outputPath, settings.TopN, analysis);
-                break;
-            case "json":
-                JsonReportExporter.Export(finalReport, outputPath, analysis);
-                break;
+            switch (outputFormat)
+            {
+                case "html":
+                    HtmlReportExporter.Export(finalReport, outputPath, settings.TopN, analysis);
+                    break;
+                case "json":
+                    JsonReportExporter.Export(finalReport, outputPath, analysis);
+                    break;
+            }
         }
 
-        Step($"Saved to: {outputPath}");
+        Console.WriteLine($"    Saved to: {outputPath}");
 
         // ── 5. Open in browser (HTML only, opt-out + environment-aware) ─
         if (outputFormat == "html" && ShouldOpenBrowser(settings))
         {
-            Step("Opening in default browser");
             if (!TryOpenInBrowser(outputPath))
-            {
-                Console.WriteLine("   (Could not launch browser automatically. Open the file above manually.)");
-            }
+                Console.WriteLine("    (Could not launch browser automatically. Open the file above manually.)");
+            else
+                Console.WriteLine("    Opened in default browser");
         }
         else if (outputFormat == "html")
         {
-            Console.WriteLine("   (Browser launch skipped. Open the file manually or rerun without --no-open.)");
+            Console.WriteLine("    (Browser launch skipped. Open the file manually or rerun without --no-open.)");
         }
 
         // ── 6. Summary line with top finding ────────────────────────
@@ -115,8 +164,6 @@ public static class BuildCommand
 
         return exitCode;
     }
-
-    private static void Step(string message) => Console.WriteLine($"==> {message}");
 
     private static (string path, string format) ResolveOutputPath(BuildCommandSettings settings)
     {
