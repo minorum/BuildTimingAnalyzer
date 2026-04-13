@@ -296,6 +296,42 @@ public static class HtmlReportExporter
   <td class="right muted">{ar.Generators.Count}</td>
 </tr>
 """);
+
+                // Drill-down: top entries by time. Filter trivial entries (< 100ms)
+                // so the breakdown only shows assemblies that meaningfully contribute.
+                var topAnalyzers = ar.Analyzers
+                    .Where(e => e.Time.TotalMilliseconds >= 100)
+                    .OrderByDescending(e => e.Time)
+                    .Take(5)
+                    .ToList();
+                var topGenerators = ar.Generators
+                    .Where(e => e.Time.TotalMilliseconds >= 100)
+                    .OrderByDescending(e => e.Time)
+                    .Take(5)
+                    .ToList();
+
+                if (topAnalyzers.Count > 0)
+                {
+                    var aList = string.Join(", ",
+                        topAnalyzers.Select(e =>
+                            $"<strong>{Esc(e.AssemblyName)}</strong> {Esc(ConsoleReportRenderer.FormatDuration(e.Time))} <span class=\"muted\">({e.Percent:F0}%)</span>"));
+                    sb.AppendLine($"""
+<tr class="drilldown">
+  <td colspan="6"><em>top analyzers:</em> {aList}</td>
+</tr>
+""");
+                }
+                if (topGenerators.Count > 0)
+                {
+                    var gList = string.Join(", ",
+                        topGenerators.Select(e =>
+                            $"<strong>{Esc(e.AssemblyName)}</strong> {Esc(ConsoleReportRenderer.FormatDuration(e.Time))} <span class=\"muted\">({e.Percent:F0}%)</span>"));
+                    sb.AppendLine($"""
+<tr class="drilldown">
+  <td colspan="6"><em>top generators:</em> {gList}</td>
+</tr>
+""");
+                }
             }
             sb.AppendLine("</tbody></table>");
         }
@@ -328,6 +364,40 @@ public static class HtmlReportExporter
                 }
                 sb.AppendLine("</tbody></table>");
             }
+        }
+
+        // Warnings vs Build Cost
+        var warningProjects = report.Projects
+            .Where(p => p.WarningCount > 0)
+            .OrderByDescending(p => p.WarningCount)
+            .ToList();
+        if (warningProjects.Count > 0 && report.WarningCount >= 5)
+        {
+            var totalAttributedWarn = warningProjects.Sum(p => p.WarningCount);
+
+            sb.AppendLine("<h2>Warnings vs Build Cost</h2>");
+            sb.AppendLine("<p class=\"note\">Top warning sources alongside their self time. Warnings on expensive projects are higher leverage to fix — they live in code that the build is already paying to compile. Warnings on cheap projects are quality issues but rarely a cost story.</p>");
+            sb.AppendLine("<table><thead><tr><th class=\"right\">#</th><th>Project</th><th class=\"right\">Warnings</th><th class=\"right\">% of Attributed</th><th class=\"right\">Self Time</th><th class=\"right\">% Self</th></tr></thead><tbody>");
+            int wr = 1;
+            foreach (var p in warningProjects.Take(10))
+            {
+                var sharePct = totalAttributedWarn > 0 ? (double)p.WarningCount / totalAttributedWarn * 100 : 0;
+                var costClass = p.SelfPercent >= 5 ? "yellow" : "muted";
+                sb.AppendLine($"""
+<tr>
+  <td class="right rank">{wr++}</td>
+  <td>{Esc(p.Name)}</td>
+  <td class="right"><strong class="yellow">{p.WarningCount}</strong></td>
+  <td class="right muted">{sharePct:F0}%</td>
+  <td class="right {costClass}">{Esc(ConsoleReportRenderer.FormatDuration(p.SelfTime))}</td>
+  <td class="right muted">{p.SelfPercent:F1}%</td>
+</tr>
+""");
+            }
+            sb.AppendLine("</tbody></table>");
+
+            if (report.UnattributedWarningCount > 0)
+                sb.AppendLine($"<p class=\"note\">{report.UnattributedWarningCount} additional warning(s) could not be attributed to a specific project (typically SDK/MSBuild infrastructure warnings).</p>");
         }
 
         // Span outliers
