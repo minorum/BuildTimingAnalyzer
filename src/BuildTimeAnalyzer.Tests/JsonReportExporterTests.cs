@@ -40,6 +40,7 @@ public sealed class JsonReportExporterTests
             ErrorCount = 0,
             WarningCount = 3,
             AttributedWarningCount = 3,
+            WarningsByCode = [],
             Projects = [project],
             TopTargets = [target],
             Context = new BuildContext { Configuration = "Debug" },

@@ -30,6 +30,7 @@ public sealed class HtmlReportExporterTests
             ErrorCount = succeeded ? 0 : 2,
             WarningCount = 3,
             AttributedWarningCount = 3,
+            WarningsByCode = [],
             Projects = [project],
             TopTargets = [],
             Context = new BuildContext { Configuration = "Release" },

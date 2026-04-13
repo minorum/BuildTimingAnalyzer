@@ -12,6 +12,13 @@ public sealed record BuildReport
     public required int AttributedWarningCount { get; init; }
     public int UnattributedWarningCount => WarningCount - AttributedWarningCount;
 
+    /// <summary>
+    /// Per-code warning tallies (e.g. CS8600 → 42). Built from BuildWarningEventArgs.Code
+    /// captured in the binlog — does not require the text build log. Empty when no warnings
+    /// carried a recognizable code.
+    /// </summary>
+    public required IReadOnlyList<WarningCodeTally> WarningsByCode { get; init; }
+
     public required IReadOnlyList<ProjectTiming> Projects { get; init; }
     public required IReadOnlyList<TargetTiming> TopTargets { get; init; }
 
@@ -288,6 +295,18 @@ public sealed record AnalyzerReport
     public required TimeSpan CscWallTime { get; init; }
     public required IReadOnlyList<AnalyzerEntry> Analyzers { get; init; }
     public required IReadOnlyList<AnalyzerEntry> Generators { get; init; }
+}
+
+/// <summary>
+/// Tally of a single warning code (e.g. "CS8600") with its prefix category.
+/// Prefix groupings: CS (C# compiler), CA (Roslyn analyzers), IDE, NETSDK, NU (NuGet),
+/// MSB (MSBuild). The prefix is extracted by scanning leading letters from the code.
+/// </summary>
+public sealed record WarningCodeTally
+{
+    public required string Code { get; init; }
+    public required string Prefix { get; init; }
+    public required int Count { get; init; }
 }
 
 public sealed record AnalyzerEntry

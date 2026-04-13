@@ -68,6 +68,7 @@ public sealed class LogAnalyzer
         int errorCount = 0;
         int warningCount = 0;
         int attributedWarningCount = 0;
+        var warningCodeCounts = new Dictionary<string, int>(StringComparer.Ordinal);
         DateTime buildStart = DateTime.MaxValue;
         DateTime buildEnd = DateTime.MinValue;
         bool succeeded = false;
@@ -314,17 +315,19 @@ public sealed class LogAnalyzer
                     }
                     break;
 
-                case BuildWarningEventArgs:
+                case BuildWarningEventArgs warnEvent:
                     warningCount++;
 
                     {
-                        var ctx = ((BuildWarningEventArgs)record.Args).BuildEventContext;
+                        var ctx = warnEvent.BuildEventContext;
                         var key = ctx?.ProjectInstanceId ?? -1;
                         if (key >= 0 && projectTimings.TryGetValue(key, out var acc))
                         {
                             acc.WarningCount++;
                             attributedWarningCount++;
                         }
+                        if (!string.IsNullOrEmpty(warnEvent.Code))
+                            warningCodeCounts[warnEvent.Code] = warningCodeCounts.GetValueOrDefault(warnEvent.Code) + 1;
                     }
                     break;
             }
@@ -580,6 +583,16 @@ public sealed class LogAnalyzer
         var projectDiagnoses = ProjectDiagnosisBuilder.Build(
             projectList, analyzerReports, criticalPath, spanOutliers, taskTimingList);
 
+        var warningsByCode = warningCodeCounts
+            .Select(kv => new WarningCodeTally
+            {
+                Code = kv.Key,
+                Prefix = ExtractPrefix(kv.Key),
+                Count = kv.Value,
+            })
+            .OrderByDescending(t => t.Count)
+            .ToList();
+
         return new BuildReport
         {
             ProjectOrSolutionPath = projectOrSolutionPath,
@@ -589,6 +602,7 @@ public sealed class LogAnalyzer
             ErrorCount = errorCount,
             WarningCount = warningCount,
             AttributedWarningCount = attributedWarningCount,
+            WarningsByCode = warningsByCode,
             Projects = projectList,
             TopTargets = topTargetList,
             TopTasks = topTaskList,
@@ -819,6 +833,14 @@ public sealed class LogAnalyzer
             configuration = cfg;
         if (env.TryGetValue("MSBuildNodeCount", out var nc) && int.TryParse(nc, out var p) && p > 0)
             parallelism = p;
+    }
+
+    private static string ExtractPrefix(string code)
+    {
+        // Leading ASCII letters form the prefix (CS, CA, IDE, NETSDK, NU, MSB, ...).
+        int i = 0;
+        while (i < code.Length && char.IsAsciiLetter(code[i])) i++;
+        return i == 0 ? "OTHER" : code[..i];
     }
 
     private sealed class ProjectAccumulator

@@ -127,6 +127,7 @@ public static class HtmlReportExporter
     <div class="label">Warnings</div>
     <div class="value muted">{{report.WarningCount}} total</div>
     <div class="sub">{{report.AttributedWarningCount}} attributed &middot; {{report.UnattributedWarningCount}} unattributed</div>
+    {{FormatTopWarningCategoriesHtml(report)}}
   </div>
 </div>
 """);
@@ -400,6 +401,37 @@ public static class HtmlReportExporter
                 sb.AppendLine($"<p class=\"note\">{report.UnattributedWarningCount} additional warning(s) could not be attributed to a specific project (typically SDK/MSBuild infrastructure warnings).</p>");
         }
 
+        // Warnings by Category
+        if (report.WarningsByCode.Count > 0)
+        {
+            var byPrefix = report.WarningsByCode
+                .GroupBy(t => t.Prefix)
+                .Select(g => new
+                {
+                    Prefix = g.Key,
+                    Count = g.Sum(t => t.Count),
+                    TopCodes = g.OrderByDescending(t => t.Count).Take(3).ToList(),
+                })
+                .OrderByDescending(x => x.Count)
+                .ToList();
+
+            sb.AppendLine("<h2>Warning Categories</h2>");
+            sb.AppendLine("<p class=\"note\">Grouped by code prefix. CS = C# compiler (nullable, deprecation, etc.), CA = Roslyn analyzers, NETSDK = SDK, NU = NuGet, MSB = MSBuild. The full code of the top 3 sources in each category is shown so you know what to target first.</p>");
+            sb.AppendLine("<table><thead><tr><th>Category</th><th class=\"right\">Count</th><th>Top codes</th></tr></thead><tbody>");
+            foreach (var g in byPrefix)
+            {
+                var top = string.Join(", ", g.TopCodes.Select(c => $"<strong>{Esc(c.Code)}</strong> <span class=\"muted\">({c.Count})</span>"));
+                sb.AppendLine($"""
+<tr>
+  <td>{Esc(PrefixLabel(g.Prefix))}</td>
+  <td class="right"><strong class="yellow">{g.Count}</strong></td>
+  <td>{top}</td>
+</tr>
+""");
+            }
+            sb.AppendLine("</tbody></table>");
+        }
+
         // Span outliers
         if (report.SpanOutliers.Count > 0)
         {
@@ -647,6 +679,20 @@ public static class HtmlReportExporter
         return string.Join(", ", parts);
     }
 
+    private static string FormatTopWarningCategoriesHtml(BuildReport report)
+    {
+        if (report.WarningsByCode.Count == 0) return "";
+        var byPrefix = report.WarningsByCode
+            .GroupBy(t => t.Prefix)
+            .Select(g => new { Prefix = g.Key, Count = g.Sum(t => t.Count) })
+            .OrderByDescending(x => x.Count)
+            .Take(3)
+            .ToList();
+        if (byPrefix.Count == 0) return "";
+        var text = string.Join(" · ", byPrefix.Select(x => $"{Esc(x.Prefix)} {x.Count}"));
+        return $"<div class=\"sub\">{text}</div>";
+    }
+
     private static void AppendTopSuspects(StringBuilder sb, BuildAnalysis? analysis)
     {
         if (analysis is null) return;
@@ -768,6 +814,19 @@ public static class HtmlReportExporter
         TargetCategory.Uncategorized => "uncategorized",
         TargetCategory.Other => "internal",
         _ => "unknown",
+    };
+
+    private static string PrefixLabel(string prefix) => prefix switch
+    {
+        "CS" => "CS — C# compiler",
+        "CA" => "CA — Roslyn analyzers",
+        "IDE" => "IDE — IDE analyzers",
+        "NETSDK" => "NETSDK — .NET SDK",
+        "NU" => "NU — NuGet",
+        "MSB" => "MSB — MSBuild",
+        "SA" => "SA — StyleCop",
+        "VB" => "VB — Visual Basic compiler",
+        _ => prefix,
     };
 
     private static string Esc(string? s) =>
