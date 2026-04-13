@@ -25,6 +25,7 @@ public sealed class BuildAnalyzerTests
             WarningCount = warningCount,
             AttributedWarningCount = warningCount,
             WarningsByCode = [],
+            GeneratedComInterfaceUsages = [],
             Projects = projects ?? [],
             TopTargets = targets ?? [],
             Context = new BuildContext(),

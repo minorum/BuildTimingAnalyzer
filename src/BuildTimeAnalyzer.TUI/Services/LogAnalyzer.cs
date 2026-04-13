@@ -593,6 +593,8 @@ public sealed class LogAnalyzer
             .OrderByDescending(t => t.Count)
             .ToList();
 
+        var comInterfaceUsages = SourceAttributeScanner.FindGeneratedComInterfaceUsages(projectList);
+
         return new BuildReport
         {
             ProjectOrSolutionPath = projectOrSolutionPath,
@@ -603,6 +605,7 @@ public sealed class LogAnalyzer
             WarningCount = warningCount,
             AttributedWarningCount = attributedWarningCount,
             WarningsByCode = warningsByCode,
+            GeneratedComInterfaceUsages = comInterfaceUsages,
             Projects = projectList,
             TopTargets = topTargetList,
             TopTasks = topTaskList,

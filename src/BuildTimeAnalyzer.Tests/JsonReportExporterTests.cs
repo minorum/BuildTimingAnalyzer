@@ -41,6 +41,7 @@ public sealed class JsonReportExporterTests
             WarningCount = 3,
             AttributedWarningCount = 3,
             WarningsByCode = [],
+            GeneratedComInterfaceUsages = [],
             Projects = [project],
             TopTargets = [target],
             Context = new BuildContext { Configuration = "Debug" },

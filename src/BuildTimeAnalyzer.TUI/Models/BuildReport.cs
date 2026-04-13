@@ -19,6 +19,18 @@ public sealed record BuildReport
     /// </summary>
     public required IReadOnlyList<WarningCodeTally> WarningsByCode { get; init; }
 
+    /// <summary>Prefix-keyed rollup of <see cref="WarningsByCode"/> (CS → 847, CA → 289 …).</summary>
+    public IReadOnlyDictionary<string, int> WarningsByPrefix =>
+        WarningsByCode
+            .GroupBy(t => t.Prefix)
+            .ToDictionary(g => g.Key, g => g.Sum(t => t.Count));
+
+    /// <summary>
+    /// Project names (short name) where at least one .cs file contains <c>[GeneratedComInterface]</c>.
+    /// Used to confirm whether ComInterfaceGenerator cost is no-op (empty list → no usages found).
+    /// </summary>
+    public required IReadOnlyList<string> GeneratedComInterfaceUsages { get; init; }
+
     public required IReadOnlyList<ProjectTiming> Projects { get; init; }
     public required IReadOnlyList<TargetTiming> TopTargets { get; init; }
 

@@ -31,6 +31,7 @@ public sealed class HtmlReportExporterTests
             WarningCount = 3,
             AttributedWarningCount = 3,
             WarningsByCode = [],
+            GeneratedComInterfaceUsages = [],
             Projects = [project],
             TopTargets = [],
             Context = new BuildContext { Configuration = "Release" },
