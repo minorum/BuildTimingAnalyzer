@@ -54,6 +54,8 @@ public static class ProjectDiagnosisBuilder
 
             var summary = BuildSummary(p, topCat, topCatPct, topTask, ar, onCritical, isOutlier);
 
+            var packages = ProjectPackageResolver.Resolve(p.FullPath);
+
             result.Add(new ProjectDiagnosis
             {
                 ProjectName = p.Name,
@@ -68,6 +70,7 @@ public static class ProjectDiagnosisBuilder
                 OnCriticalPath = onCritical,
                 IsSpanOutlier = isOutlier,
                 Summary = summary,
+                Packages = packages,
             });
         }
 

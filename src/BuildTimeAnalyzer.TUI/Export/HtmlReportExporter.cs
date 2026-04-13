@@ -835,10 +835,73 @@ public static class HtmlReportExporter
 <div class="finding severity-info" style="border-left-color:var(--cyan)">
   <div><strong>{Esc(d.ProjectName)}</strong> — {Esc(ConsoleReportRenderer.FormatDuration(d.SelfTime))} ({d.SelfPercent:F1}%){badgeHtml}</div>
   <div class="detail" style="margin-top:8px">{Esc(d.Summary)}</div>
-</div>
 """);
+            AppendPackagePanel(sb, d.Packages);
+            sb.AppendLine("</div>");
         }
         sb.AppendLine("</div>");
+    }
+
+    private static void AppendPackagePanel(StringBuilder sb, ProjectPackages? packages)
+    {
+        if (packages is null || packages.Quality == ProjectDataQuality.NoCsproj) return;
+        if (packages.DirectPackages.Count == 0 && packages.TransitivePackages.Count == 0 && packages.ProjectReferences.Count == 0)
+            return;
+
+        var quality = packages.Quality == ProjectDataQuality.CsprojOnly
+            ? "<span class=\"muted\" title=\"project.assets.json not found — transitive packages unavailable\">⚠ direct only</span>"
+            : "";
+        var summaryText = $"Package References (direct: {packages.DirectPackages.Count}, transitive: {packages.TransitivePackages.Count}, project: {packages.ProjectReferences.Count}) {quality}";
+
+        sb.AppendLine($"""
+<details style="margin-top:10px">
+  <summary class="muted" style="cursor:pointer; font-size:0.85rem">{summaryText}</summary>
+  <div style="margin-top:8px; font-size:0.85rem">
+""");
+
+        if (packages.DirectPackages.Count > 0)
+        {
+            sb.AppendLine("<table style=\"margin-bottom:6px\"><thead><tr><th>Direct Package</th><th>Version</th><th></th></tr></thead><tbody>");
+            foreach (var pkg in packages.DirectPackages.OrderBy(p => p.Id, StringComparer.OrdinalIgnoreCase))
+            {
+                var heavyBadge = pkg.IsKnownHeavy ? " <span class=\"cat-badge cat-uncategorized\" title=\"Known heavy package (large transitive graph or source generators)\">heavy</span>" : "";
+                sb.AppendLine($"<tr><td><strong>{Esc(pkg.Id)}</strong>{heavyBadge}</td><td class=\"muted\">{Esc(pkg.Version ?? "")}</td><td></td></tr>");
+            }
+            sb.AppendLine("</tbody></table>");
+        }
+
+        if (packages.ProjectReferences.Count > 0)
+        {
+            var refs = string.Join(", ", packages.ProjectReferences.Select(Esc));
+            sb.AppendLine($"<div style=\"margin-bottom:6px\"><span class=\"muted\">Project references:</span> {refs}</div>");
+        }
+
+        if (packages.TransitivePackages.Count > 0)
+        {
+            var shown = packages.TransitivePackages
+                .Where(t => t.IsKnownHeavy || string.IsNullOrEmpty(t.ParentPackage) == false)
+                .OrderByDescending(t => t.IsKnownHeavy)
+                .ThenBy(t => t.Id, StringComparer.OrdinalIgnoreCase)
+                .Take(25)
+                .ToList();
+
+            if (shown.Count > 0)
+            {
+                sb.AppendLine("<details><summary class=\"muted\" style=\"cursor:pointer\">Transitive (top " + shown.Count + " of " + packages.TransitivePackages.Count + ")</summary>");
+                sb.AppendLine("<table style=\"margin-top:6px\"><thead><tr><th>Transitive</th><th>Version</th><th>Pulled In By</th></tr></thead><tbody>");
+                foreach (var pkg in shown)
+                {
+                    var heavyBadge = pkg.IsKnownHeavy ? " <span class=\"cat-badge cat-uncategorized\">heavy</span>" : "";
+                    var parent = pkg.ParentPackage is null ? "<span class=\"muted\">—</span>" : $"<span class=\"muted\">← {Esc(pkg.ParentPackage)}</span>";
+                    sb.AppendLine($"<tr><td class=\"muted\">{Esc(pkg.Id)}{heavyBadge}</td><td class=\"muted\">{Esc(pkg.Version ?? "")}</td><td>{parent}</td></tr>");
+                }
+                sb.AppendLine("</tbody></table>");
+                sb.AppendLine("</details>");
+            }
+        }
+
+        sb.AppendLine("  </div>");
+        sb.AppendLine("</details>");
     }
 
     private static List<(string Key, string Value)> BuildContextRows(BuildReport report)

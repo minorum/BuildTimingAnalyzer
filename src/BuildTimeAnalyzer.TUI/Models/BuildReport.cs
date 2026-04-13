@@ -321,6 +321,40 @@ public sealed record AnalyzerEntry
 /// category composition, analyzer/generator cost, graph position, and span/self pattern
 /// into one compact explanation.
 /// </summary>
+/// <summary>
+/// Quality of package/reference data attached to a project. Reflects what the resolver
+/// actually had access to on disk — the reader can judge the report accordingly.
+/// </summary>
+public enum ProjectDataQuality
+{
+    /// <summary>Both .csproj and obj/project.assets.json were parsed — direct + transitive data.</summary>
+    Full,
+    /// <summary>Only .csproj parsed — direct packages only, no transitive graph.</summary>
+    CsprojOnly,
+    /// <summary>No project data available. Nothing to display.</summary>
+    NoCsproj,
+}
+
+public enum PackageReferenceSource { Direct, Transitive, ProjectReference }
+
+public sealed record PackageRef
+{
+    public required string Id { get; init; }
+    public string? Version { get; init; }
+    public required PackageReferenceSource Source { get; init; }
+    /// <summary>For transitive packages, the direct-reference package that pulled this in (one-level walk).</summary>
+    public string? ParentPackage { get; init; }
+    public bool IsKnownHeavy { get; init; }
+}
+
+public sealed record ProjectPackages
+{
+    public required ProjectDataQuality Quality { get; init; }
+    public required IReadOnlyList<PackageRef> DirectPackages { get; init; }
+    public required IReadOnlyList<PackageRef> TransitivePackages { get; init; }
+    public required IReadOnlyList<string> ProjectReferences { get; init; }
+}
+
 public sealed record ProjectDiagnosis
 {
     public required string ProjectName { get; init; }
@@ -336,4 +370,6 @@ public sealed record ProjectDiagnosis
     public bool IsSpanOutlier { get; init; }
     /// <summary>Factual one-paragraph synthesis. No interpretation beyond measured data.</summary>
     public required string Summary { get; init; }
+    /// <summary>Package and project references resolved from .csproj / project.assets.json. Null when no data was available.</summary>
+    public ProjectPackages? Packages { get; init; }
 }
