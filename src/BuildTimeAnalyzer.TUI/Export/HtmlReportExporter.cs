@@ -41,6 +41,18 @@ public static class HtmlReportExporter
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--text); font-family: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif; padding: 32px; max-width: 1400px; margin: 0 auto; }
   code, pre, .mono { font-family: 'IBM Plex Mono', Consolas, monospace; }
+  .summary-line { margin: 12px 0 24px; font-size: 0.98rem; }
+  .summary-line .red { font-weight: 700; }
+  .bottleneck { margin: 8px 0 14px; padding: 10px 14px; border-left: 3px solid var(--yellow); background: var(--surface); border-radius: 4px; }
+  .bottleneck.sev-critical { border-left-color: var(--red); }
+  .bottleneck .b-title { font-weight: 700; }
+  .bottleneck .b-why { margin-top: 4px; font-size: 0.9rem; color: var(--muted); }
+  .bottleneck .b-inspect { margin-top: 4px; font-size: 0.9rem; color: var(--green); }
+  .chain-list { list-style: none; padding: 12px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; margin: 8px 0; display: flex; flex-wrap: wrap; gap: 8px 12px; }
+  .chain-list li { font-size: 0.88rem; }
+  .chain-list li + li::before { content: "→"; color: var(--muted); margin-right: 8px; }
+  .inspect-list { list-style: decimal; padding-left: 24px; margin: 8px 0; }
+  .inspect-list li { margin: 6px 0; font-size: 0.9rem; }
   h1 { font-size: 1.6rem; margin-bottom: 4px; }
   h2 { font-size: 1.2rem; color: var(--blue); margin: 32px 0 12px; }
   p.note { font-size: 0.8rem; color: var(--muted); margin-top: -6px; margin-bottom: 12px; font-style: italic; }
@@ -161,29 +173,23 @@ public static class HtmlReportExporter
 </style>
 </head>
 <body>
-<h1>Build Timing Report</h1>
-<p style="color:var(--muted); margin-top:4px; margin-bottom:16px">{{Esc(report.ProjectOrSolutionPath)}}</p>
-<span class="badge {{statusClass}}">{{statusText}}</span>
-
-<div class="summary-grid">
-  <div class="stat"><div class="label">Wall Clock</div><div class="value">{{Esc(ConsoleReportRenderer.FormatDuration(report.TotalDuration))}}</div></div>
-  <div class="stat"><div class="label">Started</div><div class="value" style="font-size:1rem">{{report.StartTime:HH:mm:ss}}</div></div>
-  <div class="stat"><div class="label">Projects</div><div class="value">{{report.Projects.Count}}</div></div>
-  <div class="stat"><div class="label">Errors</div><div class="value {{(report.ErrorCount > 0 ? "red" : "")}}">{{report.ErrorCount}}</div></div>
-  <div class="stat">
-    <div class="label">Warnings</div>
-    <div class="value muted">{{report.WarningCount}} total</div>
-    <div class="sub">{{report.AttributedWarningCount}} attributed &middot; {{report.UnattributedWarningCount}} unattributed</div>
-    {{FormatTopWarningCategoriesHtml(report)}}
-  </div>
-</div>
+<h1>Build Report</h1>
+<p style="color:var(--muted); margin-top:4px; margin-bottom:8px">{{Esc(report.ProjectOrSolutionPath)}}</p>
+<p class="summary-line">
+  <span class="{{(report.Succeeded ? "green" : "red")}}">{{statusText}}</span>
+  <span class="muted"> · </span>{{Esc(ConsoleReportRenderer.FormatDuration(report.TotalDuration))}} elapsed
+  <span class="muted"> · </span>{{report.Projects.Count}} project{{(report.Projects.Count == 1 ? "" : "s")}}
+  <span class="muted"> · </span><span class="{{(report.ErrorCount > 0 ? "red" : "muted")}}">{{report.ErrorCount}} error{{(report.ErrorCount == 1 ? "" : "s")}}</span>
+  <span class="muted"> · </span><span class="{{(report.WarningCount > 0 ? "yellow" : "muted")}}">{{report.WarningCount}} warning{{(report.WarningCount == 1 ? "" : "s")}}</span>
+</p>
 """);
 
-        // ── New layout: chart → action cards → critical path → why-is-this-slow ──
-        AppendBuildTimeChart(sb, report);
-        AppendActionCards(sb, report, analysis);
-        AppendCriticalPathChain(sb, report);
-        AppendWhyIsThisSlow(sb, report);
+        // ── Strict layout: bottlenecks → blocking chain → top consumers → inspect next ──
+        AppendTopBottlenecks(sb, analysis);
+        AppendBlockingChain(sb, report);
+        AppendTopConsumers(sb, report);
+        AppendInspectNext(sb, analysis);
+        AppendPerProjectBreakdown(sb, report);
 
         // Build context (collapsed)
         var ctxRows = BuildContextRows(report);
@@ -281,8 +287,8 @@ public static class HtmlReportExporter
             var totalSelfMs = report.CategoryTotals.Sum(kv => kv.Value.TotalMilliseconds);
             if (totalSelfMs > 0)
             {
-                sb.AppendLine("<h2>Self Time by Category</h2>");
-                sb.AppendLine("<table><thead><tr><th>Category</th><th class=\"right\">Self Time</th><th class=\"right\">% Self</th><th>Share</th></tr></thead><tbody>");
+                sb.AppendLine("<details class=\"section\"><summary><span class=\"arrow\">▶</span><h2>Time by Category</h2></summary>");
+                sb.AppendLine("<table><thead><tr><th>Category</th><th class=\"right\">Time</th><th class=\"right\">% of total</th><th>Share</th></tr></thead><tbody>");
                 foreach (var kv in report.CategoryTotals.OrderByDescending(x => x.Value))
                 {
                     var pct = kv.Value.TotalMilliseconds / totalSelfMs * 100;
@@ -297,6 +303,7 @@ public static class HtmlReportExporter
 """);
                 }
                 sb.AppendLine("</tbody></table>");
+                sb.AppendLine("</details>");
             }
         }
 
@@ -323,8 +330,8 @@ public static class HtmlReportExporter
                 var grandTotal = TimeSpan.FromMilliseconds(generatorTotals.Sum(x => x.Total.TotalMilliseconds));
                 var grandPct = totalSelfMsForGens > 0 ? grandTotal.TotalMilliseconds / totalSelfMsForGens * 100 : 0;
 
-                sb.AppendLine("<h2>Source Generator Cost (Solution-Wide)</h2>");
-                sb.AppendLine("<p class=\"note\">Generators aggregated across all projects. Cost is CPU-summed — a generator running in 20 projects in parallel contributes up to 20x its per-project time. The <em>% of Self</em> column compares against total project self time, so values above ~5% are meaningful.</p>");
+                sb.AppendLine("<details class=\"section\"><summary><span class=\"arrow\">▶</span><h2>Source generators (solution-wide)</h2></summary>");
+                sb.AppendLine("<p class=\"note\">Generators aggregated across all projects. Total summed across threads — may exceed elapsed time on multi-core.</p>");
                 sb.AppendLine("<table><thead><tr><th class=\"right\">#</th><th>Generator</th><th class=\"right\">Total Time</th><th class=\"right\">Projects</th><th class=\"right\">% of Self</th></tr></thead><tbody>");
                 int gRank = 1;
                 foreach (var g in generatorTotals.Take(15))
@@ -351,16 +358,15 @@ public static class HtmlReportExporter
 </tr>
 """);
                 sb.AppendLine("</tbody></table>");
-                sb.AppendLine("<p class=\"note\"><strong>Known SDK-default generators:</strong> <code>Microsoft.Interop.ComInterfaceGenerator</code> and <code>Microsoft.Interop.JSImportGenerator</code> ship with the .NET SDK and run in every project regardless of whether any <code>[GeneratedComInterface]</code> or <code>[JSImport]</code> attributes are present — they cannot be disabled without modifying SDK targets. <code>Microsoft.Gen.Metrics</code> and <code>Microsoft.Gen.Logging</code> come from <code>Microsoft.Extensions.Telemetry</code>; projects that do not use <code>[LoggerMessage]</code> or <code>[Meter]</code> source generation should not reference that package.</p>");
+                sb.AppendLine("</details>");
             }
         }
 
         // Analyzer / Generator Reports (per-project, collapsed by default)
         if (report.AnalyzerReports.Count > 0)
         {
-            sb.AppendLine("<h2>Per-Project Analyzer &amp; Generator Breakdown</h2>");
-            sb.AppendLine("<p class=\"note\">Per-project detail from -p:ReportAnalyzer=true. Times are CPU-summed (may exceed Csc wall time on multi-core). Treat them as relative cost signals between projects, not absolute compiler-proper measurements.</p>");
-            sb.AppendLine("<details><summary class=\"muted\" style=\"cursor:pointer; padding:8px 0\">Show per-project breakdown</summary>");
+            sb.AppendLine("<details class=\"section\"><summary><span class=\"arrow\">▶</span><h2>Per-project analyzer &amp; generator breakdown</h2></summary>");
+            sb.AppendLine("<p class=\"note\">Per-project detail from -p:ReportAnalyzer=true. Total summed across threads; may exceed elapsed on multi-core.</p>");
             sb.AppendLine("<table><thead><tr><th>Project</th><th class=\"right\">Csc Wall</th><th class=\"right\">Analyzer Time</th><th class=\"right\">Generator Time</th><th class=\"right\">Analyzers</th><th class=\"right\">Generators</th></tr></thead><tbody>");
             foreach (var ar in report.AnalyzerReports.OrderByDescending(a => a.TotalAnalyzerTime + a.TotalGeneratorTime))
             {
@@ -415,11 +421,11 @@ public static class HtmlReportExporter
             sb.AppendLine("</details>");
         }
 
-        // Reference overhead
+        // Reference overhead (collapsed)
         if (report.ReferenceOverhead is { } overhead)
         {
-            sb.AppendLine("<h2>Reference Overhead</h2>");
-            sb.AppendLine("<p class=\"note\">Aggregated reference-related work across the solution (ResolveAssemblyReferences, ProcessFrameworkReferences, _HandlePackageFileConflicts, etc.).</p>");
+            sb.AppendLine("<details class=\"section\"><summary><span class=\"arrow\">▶</span><h2>Reference resolution overhead</h2></summary>");
+            sb.AppendLine("<p class=\"note\">Aggregated reference work (ResolveAssemblyReferences, ProcessFrameworkReferences, _HandlePackageFileConflicts).</p>");
             sb.AppendLine("<div class=\"context-grid\">");
             sb.AppendLine($"<div><span class=\"k\">Total self time in reference work:</span> <span class=\"v\">{Esc(ConsoleReportRenderer.FormatDuration(overhead.TotalSelfTime))}</span></div>");
             sb.AppendLine($"<div><span class=\"k\">Share of total self time:</span> <span class=\"v\">{overhead.SelfPercent:F1}%</span></div>");
@@ -443,6 +449,7 @@ public static class HtmlReportExporter
                 }
                 sb.AppendLine("</tbody></table>");
             }
+            sb.AppendLine("</details>");
         }
 
         // Warnings vs Build Cost
@@ -494,8 +501,8 @@ public static class HtmlReportExporter
                 .OrderByDescending(x => x.Count)
                 .ToList();
 
-            sb.AppendLine("<h2>Warning Categories</h2>");
-            sb.AppendLine("<p class=\"note\">Grouped by code prefix. CS = C# compiler (nullable, deprecation, etc.), CA = Roslyn analyzers, NETSDK = SDK, NU = NuGet, MSB = MSBuild. The full code of the top 3 sources in each category is shown so you know what to target first.</p>");
+            sb.AppendLine("<details class=\"section\"><summary><span class=\"arrow\">▶</span><h2>Warning categories</h2></summary>");
+            sb.AppendLine("<p class=\"note\">Grouped by code prefix. Top 3 codes per category so you know what to target.</p>");
             sb.AppendLine("<table><thead><tr><th>Category</th><th class=\"right\">Count</th><th>Top codes</th></tr></thead><tbody>");
             foreach (var g in byPrefix)
             {
@@ -509,235 +516,19 @@ public static class HtmlReportExporter
 """);
             }
             sb.AppendLine("</tbody></table>");
+            sb.AppendLine("</details>");
         }
 
-        // Span outliers
-        if (report.SpanOutliers.Count > 0)
-        {
-            sb.AppendLine("<h2>Span vs Self Outliers</h2>");
-            sb.AppendLine("<p class=\"note\">Rule: Span ≥ 5s, Span/SelfTime ≥ 5x, Span − SelfTime ≥ 3s. The pattern has several possible causes (dependency waiting, SDK orchestration, reference work, static-web-assets, test/benchmark shape, incremental effects) — timing alone does not identify which. Cross-reference with Dependency Hubs and category composition.</p>");
-            sb.AppendLine("<table><thead><tr><th class=\"right\">#</th><th>Project</th><th>Kind (heuristic)</th><th class=\"right\">Span</th><th class=\"right\">Self Time</th><th class=\"right\">Ratio</th></tr></thead><tbody>");
-            int r = 1;
-            foreach (var p in report.SpanOutliers.Take(15))
-            {
-                var ratio = p.SelfTime.TotalMilliseconds > 0 ? p.Span.TotalMilliseconds / p.SelfTime.TotalMilliseconds : 0;
-                sb.AppendLine($"""
-<tr>
-  <td class="right rank">{r++}</td>
-  <td class="yellow">{Esc(p.Name)}</td>
-  <td class="muted">{Esc(ProjectKindHeuristic.Label(p.KindHeuristic))}</td>
-  <td class="right"><strong>{Esc(ConsoleReportRenderer.FormatDuration(p.Span))}</strong></td>
-  <td class="right muted">{Esc(ConsoleReportRenderer.FormatDuration(p.SelfTime))}</td>
-  <td class="right">{ratio:F1}x</td>
-</tr>
-""");
-            }
-            sb.AppendLine("</tbody></table>");
-        }
+        // Removed per spec:
+        //   Span vs Self Outliers — structural observation, not a specific bottleneck.
+        //   Project Count Tax Indicators — patterns to investigate, not answers.
+        //   Build Timeline — decorative chart; Top Consumers + Blocking Chain cover the signal.
+        //   Top Projects by Self Time — duplicated by Top Consumers above.
+        //   Top Targets by Self Time — too far from actionable; tasks belong under their project.
+        //   Top Tasks by Self Time — merged into Per-Project Breakdown.
+        //   Potentially Custom Targets — heuristic with too many false positives to promote.
 
-        // Project Count Tax
-        if (report.Projects.Count > 0)
-        {
-            var tax = report.ProjectCountTax;
-            sb.AppendLine("<h2>Project Count Tax Indicators</h2>");
-            sb.AppendLine("<p class=\"note\">Candidate signals that the solution pays graph/orchestration cost disproportionate to local work. Each indicator is a pattern to investigate, not proof of a problem.</p>");
-            sb.AppendLine("<div class=\"context-grid\">");
-            sb.AppendLine($"<div><span class=\"k\">References &gt; compile:</span> <span class=\"v\">{tax.ReferencesExceedCompileCount} of {tax.TotalProjects}</span></div>");
-            sb.AppendLine($"<div><span class=\"k\">References are the majority of self time:</span> <span class=\"v\">{tax.ReferencesMajorityCount} of {tax.TotalProjects}</span></div>");
-            sb.AppendLine($"<div><span class=\"k\">Tiny self / huge span:</span> <span class=\"v\">{tax.TinySelfHugeSpanCount} of {tax.TotalProjects}</span></div>");
-            sb.AppendLine("</div>");
-
-            if (tax.PerKindStats.Count > 0)
-            {
-                sb.AppendLine("<p class=\"note\">Per-kind medians (name-based heuristic — not authoritative).</p>");
-                sb.AppendLine("<table><thead><tr><th>Kind</th><th class=\"right\">Count</th><th class=\"right\">Median Self</th><th class=\"right\">Median Span</th><th class=\"right\">Median Span/Self</th></tr></thead><tbody>");
-                foreach (var s in tax.PerKindStats)
-                {
-                    var ratio = s.MedianSpanToSelfRatio > 0 ? $"{s.MedianSpanToSelfRatio:F1}x" : "n/a";
-                    sb.AppendLine($"""
-<tr>
-  <td class="muted">{Esc(ProjectKindHeuristic.Label(s.Kind))}</td>
-  <td class="right">{s.Count}</td>
-  <td class="right">{Esc(ConsoleReportRenderer.FormatDuration(s.MedianSelfTime))}</td>
-  <td class="right">{Esc(ConsoleReportRenderer.FormatDuration(s.MedianSpan))}</td>
-  <td class="right">{ratio}</td>
-</tr>
-""");
-                }
-                sb.AppendLine("</tbody></table>");
-            }
-        }
-
-        // Timeline
-        if (report.Projects.Count > 0 && report.TotalDuration.TotalMilliseconds > 0)
-        {
-            sb.AppendLine("<h2>Build Timeline</h2>");
-            var subtitle = hasCriticalPath
-                ? "Wall-clock Span per project. Red bars are on the critical path estimate; grey bars are not."
-                : "Wall-clock Span per project.";
-            sb.AppendLine($"<p class=\"note\">{subtitle}</p>");
-            sb.AppendLine("<div class=\"analysis\" style=\"overflow-x:auto\">");
-            var totalMs = report.TotalDuration.TotalMilliseconds;
-            var timelineProjects = report.Projects.OrderBy(p => p.StartOffset).ToList();
-            foreach (var p in timelineProjects)
-            {
-                var leftPct = p.StartOffset.TotalMilliseconds / totalMs * 100;
-                var widthPct = Math.Max(0.5, (p.EndOffset - p.StartOffset).TotalMilliseconds / totalMs * 100);
-                var onCritical = hasCriticalPath && criticalSet.Contains(p.FullPath);
-                var barColor = onCritical ? "var(--red)" : "var(--muted)";
-                var rowClass = onCritical ? "timeline-row critical" : "timeline-row";
-                sb.AppendLine($"""
-<div class="{rowClass}">
-  <span class="name">{Esc(p.Name)}</span>
-  <div class="track">
-    <div style="position:absolute; left:{leftPct:F1}%; width:{widthPct:F1}%; height:100%; border-radius:3px; background:{barColor}" title="{Esc(p.Name)}: {Esc(ConsoleReportRenderer.FormatDuration(p.Span))}"></div>
-  </div>
-  <span class="dur">{Esc(ConsoleReportRenderer.FormatDuration(p.Span))}</span>
-</div>
-""");
-            }
-            sb.AppendLine("<div class=\"timeline-row\" style=\"margin-top:6px; color:var(--muted); font-size:0.75rem\">");
-            sb.AppendLine("<span class=\"name\"></span>");
-            sb.AppendLine("<div class=\"track\" style=\"background:transparent; display:flex; justify-content:space-between\">");
-            for (int i = 0; i <= 4; i++)
-                sb.AppendLine($"<span>{Esc(ConsoleReportRenderer.FormatDuration(TimeSpan.FromMilliseconds(totalMs * i / 4)))}</span>");
-            sb.AppendLine("</div>");
-            sb.AppendLine("<span class=\"dur\"></span>");
-            sb.AppendLine("</div>");
-            sb.AppendLine("</div>");
-        }
-
-        // Projects table with drill-down + category composition
-        sb.AppendLine("<h2>Top Projects by Self Time</h2>");
-        sb.AppendLine("<p class=\"note\">Self Time = genuinely exclusive work. Span = wall-clock first-to-last activity (display only).</p>");
-        sb.AppendLine("<table><thead><tr><th class=\"right\">#</th><th>Project</th><th class=\"right\">Self Time</th><th class=\"right\">Span</th><th class=\"right\">% Self</th><th>Share</th><th class=\"right\">Errors</th><th class=\"right\">Warnings</th></tr></thead><tbody>");
-
-        int projRank = 1;
-        foreach (var p in report.Projects.Take(topN))
-        {
-            var barClass = p.SelfPercent > 50 ? "bar-high" : p.SelfPercent > 20 ? "bar-mid" : "bar-low";
-            var barPct = Math.Min(100, p.SelfPercent);
-            var icon = p.Succeeded ? "" : "<span class=\"red\">! </span>";
-            var errCell = p.ErrorCount > 0 ? $"<span class=\"red\">{p.ErrorCount}</span>" : "<span class=\"muted\">0</span>";
-            var warnCell = p.WarningCount > 0 ? $"<span class=\"yellow\">{p.WarningCount}</span>" : "<span class=\"muted\">0</span>";
-            var rowClass = (hasCriticalPath && criticalSet.Contains(p.FullPath)) ? " class=\"critical-path\"" : "";
-            var kindBadge = p.KindHeuristic != ProjectKind.Other
-                ? $"<span class=\"kind-badge\">{Esc(ProjectKindHeuristic.Label(p.KindHeuristic))}</span>"
-                : "";
-
-            sb.AppendLine($"""
-<tr{rowClass}>
-  <td class="right rank">{projRank++}</td>
-  <td>{icon}{Esc(p.Name)}{kindBadge}</td>
-  <td class="right"><strong>{Esc(ConsoleReportRenderer.FormatDuration(p.SelfTime))}</strong></td>
-  <td class="right muted">{Esc(ConsoleReportRenderer.FormatDuration(p.Span))}</td>
-  <td class="right muted">{p.SelfPercent:F1}%</td>
-  <td><div class="bar-wrap"><div class="bar-fill {barClass}" style="width:{barPct:F1}%"></div></div></td>
-  <td class="right">{errCell}</td>
-  <td class="right">{warnCell}</td>
-</tr>
-""");
-
-            // Category composition row
-            if (p.CategoryBreakdown.Count > 0)
-            {
-                var composition = FormatCategoryComposition(p);
-                if (composition.Length > 0)
-                {
-                    sb.AppendLine($"""
-<tr class="composition">
-  <td></td>
-  <td colspan="7"><em>composition:</em> {Esc(composition)}</td>
-</tr>
-""");
-                }
-            }
-
-            // Target drill-down
-            foreach (var t in p.Targets)
-            {
-                sb.AppendLine($"""
-<tr class="drilldown">
-  <td></td>
-  <td colspan="2">&nbsp;&nbsp;↳ <strong>{Esc(t.Name)}</strong> <span class="cat-badge cat-{t.Category.ToString().ToLowerInvariant()}">{Esc(CategoryLabel(t.Category))}</span></td>
-  <td class="right">{Esc(ConsoleReportRenderer.FormatDuration(t.SelfTime))}</td>
-  <td class="right">{t.SelfPercent:F1}%</td>
-  <td colspan="3"></td>
-</tr>
-""");
-            }
-        }
-        sb.AppendLine("</tbody></table>");
-
-        // Targets table
-        if (report.TopTargets.Count > 0)
-        {
-            sb.AppendLine("<h2>Top Targets by Self Time</h2>");
-            sb.AppendLine("<p class=\"note\">Categories are deterministic pattern matches against SDK target names — a grouping hint, not authoritative.</p>");
-            sb.AppendLine("<table><thead><tr><th class=\"right\">#</th><th>Target</th><th>Project</th><th>Category</th><th class=\"right\">Self Time</th><th class=\"right\">% Self</th></tr></thead><tbody>");
-
-            int r = 1;
-            foreach (var t in report.TopTargets)
-            {
-                sb.AppendLine($"""
-<tr>
-  <td class="right rank">{r++}</td>
-  <td class="cyan">{Esc(t.Name)}</td>
-  <td class="muted">{Esc(t.ProjectName)}</td>
-  <td><span class="cat-badge cat-{t.Category.ToString().ToLowerInvariant()}">{Esc(CategoryLabel(t.Category))}</span></td>
-  <td class="right"><strong>{Esc(ConsoleReportRenderer.FormatDuration(t.SelfTime))}</strong></td>
-  <td class="right muted">{t.SelfPercent:F1}%</td>
-</tr>
-""");
-            }
-            sb.AppendLine("</tbody></table>");
-        }
-
-        // Top Tasks (task-level breakdown)
-        if (report.TopTasks.Count > 0)
-        {
-            sb.AppendLine("<h2>Top Tasks by Self Time</h2>");
-            sb.AppendLine("<p class=\"note\">Task-level drill-down below targets. Shows which tasks inside targets are doing the work.</p>");
-            sb.AppendLine("<table><thead><tr><th class=\"right\">#</th><th>Task</th><th>Target</th><th>Project</th><th class=\"right\">Self Time</th></tr></thead><tbody>");
-            int taskRank = 1;
-            foreach (var t in report.TopTasks.Take(20))
-            {
-                sb.AppendLine($"""
-<tr>
-  <td class="right rank">{taskRank++}</td>
-  <td><strong>{Esc(t.TaskName)}</strong></td>
-  <td class="muted">{Esc(t.TargetName)}</td>
-  <td class="muted">{Esc(t.ProjectName)}</td>
-  <td class="right"><strong>{Esc(ConsoleReportRenderer.FormatDuration(t.SelfTime))}</strong></td>
-</tr>
-""");
-            }
-            sb.AppendLine("</tbody></table>");
-        }
-
-        // Potentially custom targets
-        var customTargets = report.PotentiallyCustomTargets.Where(t => t.SelfTime.TotalSeconds >= 1).Take(5).ToList();
-        if (customTargets.Count > 0)
-        {
-            sb.AppendLine("<h2>Potentially Custom Targets</h2>");
-            sb.AppendLine("<p class=\"note\">Targets that did not match any known SDK pattern and took at least 1s. Often actionable optimization hotspots.</p>");
-            sb.AppendLine("<table><thead><tr><th class=\"right\">#</th><th>Target</th><th>Project</th><th class=\"right\">Self Time</th></tr></thead><tbody>");
-            int r = 1;
-            foreach (var t in customTargets)
-            {
-                sb.AppendLine($"""
-<tr>
-  <td class="right rank">{r++}</td>
-  <td class="orange"><strong>{Esc(t.Name)}</strong></td>
-  <td class="muted">{Esc(t.ProjectName)}</td>
-  <td class="right"><strong>{Esc(ConsoleReportRenderer.FormatDuration(t.SelfTime))}</strong></td>
-</tr>
-""");
-            }
-            sb.AppendLine("</tbody></table>");
-        }
-
-        sb.AppendLine($"<footer>Generated by BuildTimeAnalyzer on {DateTime.Now:yyyy-MM-dd HH:mm:ss}</footer>");
+        sb.AppendLine("<footer style=\"margin-top:40px; color:var(--muted); font-size:0.78rem\">Generated by BuildTimeAnalyzer on " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + ". <a href=\"#\" style=\"color:var(--muted)\" onclick=\"document.querySelectorAll('details').forEach(d=>d.open=true);return false\">Expand all</a> · <a href=\"#\" style=\"color:var(--muted)\" onclick=\"document.querySelectorAll('details').forEach(d=>d.open=false);return false\">Collapse all</a></footer>");
         sb.AppendLine("</body></html>");
 
         return sb.ToString();
@@ -772,12 +563,24 @@ public static class HtmlReportExporter
         return $"<div class=\"sub\">{text}</div>";
     }
 
-    private static void AppendActionCards(StringBuilder sb, BuildReport report, BuildAnalysis? analysis)
+    // Cap at 5 per the spec — "Top bottlenecks (3–5 findings maximum)".
+    private const int MaxBottlenecks = 5;
+    // "Blocking chain — 10 nodes max."
+    private const int MaxBlockingChainNodes = 10;
+    // "Top time consumers table — 8 projects max."
+    private const int MaxTopConsumers = 8;
+    // "What to inspect next — 5 items max."
+    private const int MaxInspectNext = 5;
+
+    /// <summary>
+    /// Top bottlenecks section — strict three-line format per finding:
+    /// title with the measured number, one sentence of why, and an inspect line.
+    /// </summary>
+    private static void AppendTopBottlenecks(StringBuilder sb, BuildAnalysis? analysis)
     {
         if (analysis is null || analysis.Findings.Count == 0) return;
 
-        // Order: Critical first, then Warning, then Info — within each by upper-bound impact desc.
-        var ordered = analysis.Findings
+        var ranked = analysis.Findings
             .OrderBy(f => f.Severity switch
             {
                 FindingSeverity.Critical => 0,
@@ -785,249 +588,174 @@ public static class HtmlReportExporter
                 _ => 2,
             })
             .ThenByDescending(f => f.UpperBoundImpactPercent ?? 0)
+            .Take(MaxBottlenecks)
             .ToList();
 
-        sb.AppendLine("<h2>Action Items</h2>");
-        sb.AppendLine("<p class=\"note\">Findings ranked by severity and impact. Each card shows the measurement, the likely explanation, and a concrete next step.</p>");
-        sb.AppendLine("<div class=\"cards-grid\">");
-        foreach (var f in ordered)
+        sb.AppendLine("<h2>Top bottlenecks</h2>");
+        foreach (var f in ranked)
         {
-            var sevClass = f.Severity switch
-            {
-                FindingSeverity.Critical => "sev-critical",
-                FindingSeverity.Warning => "sev-warning",
-                _ => "sev-info",
-            };
-            var sevLabel = f.Severity.ToString().ToUpperInvariant();
-            var impact = f.UpperBoundImpactPercent is { } pct ? $"<div class=\"saving\">Up to {pct:F1}% of total self time</div>" : "";
-            var explain = string.IsNullOrEmpty(f.LikelyExplanation) ? "" : $"<div class=\"card-explain\">{Esc(f.LikelyExplanation)}</div>";
-
+            var sevClass = f.Severity == FindingSeverity.Critical ? "sev-critical" : "";
+            // Body = finding's Measured, minus any parts that restate the title. Kept short.
+            var why = string.IsNullOrEmpty(f.Measured) ? "" : $"<div class=\"b-why\">{Esc(f.Measured)}</div>";
             sb.AppendLine($"""
-<div class="card {sevClass}">
-  <div class="card-head">
-    <div class="card-title">{Esc(f.Title)}</div>
-    <span class="sev-badge">{sevLabel}</span>
-  </div>
-  <div class="card-body">{Esc(f.Measured)}</div>
-  {explain}
-  <div class="card-action">→ {Esc(f.InvestigationSuggestion)}</div>
-  {impact}
-  <div class="card-meta">{Esc(f.Evidence)} &middot; threshold {Esc(f.ThresholdName)} &middot; confidence {f.Confidence.ToString().ToLowerInvariant()}</div>
+<div class="bottleneck {sevClass}">
+  <div class="b-title">{Esc(f.Title)}</div>
+  {why}
+  <div class="b-inspect">→ Inspect: {Esc(f.InvestigationSuggestion)}</div>
 </div>
 """);
         }
-        sb.AppendLine("</div>");
-
-        if (analysis.Recommendations.Count > 0)
-        {
-            sb.AppendLine("<details class=\"section\"><summary><span class=\"arrow\">▶</span><h2>Recommendations</h2></summary>");
-            sb.AppendLine("<p class=\"note\">Investigations to run, not conclusions. Architecture decisions require more than timing data.</p>");
-            foreach (var r in analysis.Recommendations)
-                sb.AppendLine($"<div class=\"recommendation\"><span class=\"num\">{r.Number}.</span>{Esc(r.Text)}</div>");
-            sb.AppendLine("</details>");
-        }
     }
 
-    private static void AppendBuildTimeChart(StringBuilder sb, BuildReport report)
-    {
-        // Build a JSON payload of top 12 projects with category breakdown.
-        var top = report.Projects.Take(12).ToList();
-        if (top.Count == 0) return;
-
-        var criticalSet = new HashSet<string>(report.CriticalPath.Select(p => p.FullPath), StringComparer.OrdinalIgnoreCase);
-
-        var rows = new StringBuilder();
-        rows.Append('[');
-        for (int i = 0; i < top.Count; i++)
-        {
-            var p = top[i];
-            double compile = 0, refs = 0, sgen = 0, swa = 0, copy = 0, restore = 0, other = 0;
-            foreach (var (cat, ts) in p.CategoryBreakdown)
-            {
-                var ms = ts.TotalMilliseconds;
-                switch (cat)
-                {
-                    case TargetCategory.Compile: compile += ms; break;
-                    case TargetCategory.References: refs += ms; break;
-                    case TargetCategory.SourceGen: sgen += ms; break;
-                    case TargetCategory.StaticWebAssets: swa += ms; break;
-                    case TargetCategory.Copy: copy += ms; break;
-                    case TargetCategory.Restore: restore += ms; break;
-                    default: other += ms; break;
-                }
-            }
-            // If breakdown is empty, fall back to a single "other" bar.
-            if (compile + refs + sgen + swa + copy + restore + other <= 0)
-                other = p.SelfTime.TotalMilliseconds;
-
-            var crit = criticalSet.Contains(p.FullPath) ? "true" : "false";
-            if (i > 0) rows.Append(',');
-            rows.Append("{\"name\":\"").Append(JsEscape(p.Name))
-                .Append("\",\"compile\":").Append(F(compile))
-                .Append(",\"refs\":").Append(F(refs))
-                .Append(",\"sgen\":").Append(F(sgen))
-                .Append(",\"swa\":").Append(F(swa))
-                .Append(",\"copy\":").Append(F(copy))
-                .Append(",\"restore\":").Append(F(restore))
-                .Append(",\"other\":").Append(F(other))
-                .Append(",\"critical\":").Append(crit)
-                .Append('}');
-        }
-        rows.Append(']');
-
-        sb.AppendLine("<h2>Build Time by Project</h2>");
-        sb.AppendLine("<p class=\"note\">Top 12 projects by self time, stacked by category. Red dot = on the critical path. Bars are CPU-summed self time, not wall-clock.</p>");
-        sb.AppendLine("<div class=\"chart-wrap\">");
-        sb.AppendLine("<canvas id=\"buildChart\"></canvas>");
-        sb.AppendLine("""
-<div class="chart-legend">
-  <span><span class="swatch" style="background:#3fb950"></span>compile</span>
-  <span><span class="swatch" style="background:#f78166"></span>references</span>
-  <span><span class="swatch" style="background:#a371f7"></span>source-gen</span>
-  <span><span class="swatch" style="background:#58a6ff"></span>static-web</span>
-  <span><span class="swatch" style="background:#d29922"></span>copy</span>
-  <span><span class="swatch" style="background:#39d353"></span>restore</span>
-  <span><span class="swatch" style="background:#6e7681"></span>other</span>
-  <span><span class="swatch" style="background:#f85149; border-radius:50%"></span>critical path</span>
-</div>
-""");
-        sb.AppendLine("</div>");
-        sb.AppendLine($$$"""
-<script>
-(function(){
-  const data = {{{rows}}};
-  const cats = [
-    {key:"compile",  color:"#3fb950"},
-    {key:"refs",     color:"#f78166"},
-    {key:"sgen",     color:"#a371f7"},
-    {key:"swa",      color:"#58a6ff"},
-    {key:"copy",     color:"#d29922"},
-    {key:"restore",  color:"#39d353"},
-    {key:"other",    color:"#6e7681"},
-  ];
-  const canvas = document.getElementById("buildChart");
-  function draw(){
-    const dpr = window.devicePixelRatio || 1;
-    const cssW = canvas.clientWidth, cssH = canvas.clientHeight;
-    canvas.width = cssW * dpr; canvas.height = cssH * dpr;
-    const ctx = canvas.getContext("2d");
-    ctx.setTransform(dpr,0,0,dpr,0,0);
-    ctx.clearRect(0,0,cssW,cssH);
-    const padL = 220, padR = 20, padT = 10, padB = 10;
-    const rowH = (cssH - padT - padB) / data.length;
-    const max = Math.max(...data.map(d => cats.reduce((s,c)=>s+d[c.key],0)));
-    if (max <= 0) return;
-    const scale = (cssW - padL - padR) / max;
-    ctx.font = "12px 'IBM Plex Sans', system-ui, sans-serif";
-    ctx.textBaseline = "middle";
-    data.forEach((d,i) => {
-      const y = padT + i * rowH + 4;
-      const h = rowH - 8;
-      ctx.fillStyle = "#e6edf3";
-      ctx.textAlign = "right";
-      ctx.fillText(d.name, padL - 18, y + h/2);
-      if (d.critical) {
-        ctx.fillStyle = "#f85149";
-        ctx.beginPath(); ctx.arc(padL - 8, y + h/2, 4, 0, Math.PI*2); ctx.fill();
-      }
-      let x = padL;
-      cats.forEach(c => {
-        const w = d[c.key] * scale;
-        if (w > 0) {
-          ctx.fillStyle = c.color;
-          ctx.fillRect(x, y, w, h);
-          x += w;
-        }
-      });
-      ctx.fillStyle = "#8b949e";
-      ctx.textAlign = "left";
-      const total = cats.reduce((s,c)=>s+d[c.key],0);
-      ctx.fillText(formatMs(total), x + 6, y + h/2);
-    });
-  }
-  function formatMs(ms){
-    if (ms < 1000) return ms.toFixed(0)+"ms";
-    if (ms < 60000) return (ms/1000).toFixed(1)+"s";
-    const m = Math.floor(ms/60000), s = Math.round((ms%60000)/1000);
-    return m+"m "+s+"s";
-  }
-  let t;
-  function debounced(){ clearTimeout(t); t = setTimeout(draw, 80); }
-  draw();
-  window.addEventListener("resize", debounced);
-})();
-</script>
-""");
-    }
-
-    private static void AppendCriticalPathChain(StringBuilder sb, BuildReport report)
+    /// <summary>
+    /// Blocking chain — the dependent chain that most limits how quickly the build can finish.
+    /// One-phrase reason per node (dominant category), no disclaimers in the main view.
+    /// </summary>
+    private static void AppendBlockingChain(StringBuilder sb, BuildReport report)
     {
         if (report.CriticalPath.Count == 0 || report.CriticalPathTotal <= TimeSpan.Zero) return;
 
-        var totalMs = report.CriticalPathTotal.TotalMilliseconds;
         var wallMs = report.TotalDuration.TotalMilliseconds;
-        var pct = wallMs > 0 ? totalMs / wallMs * 100 : 0;
+        var pctOfElapsed = wallMs > 0 ? report.CriticalPathTotal.TotalMilliseconds / wallMs * 100 : 0;
 
-        sb.AppendLine("<h2>Critical Path</h2>");
-        sb.AppendLine($"<p class=\"note\">{report.CriticalPath.Count} projects · {Esc(ConsoleReportRenderer.FormatDuration(report.CriticalPathTotal))} of {Esc(ConsoleReportRenderer.FormatDuration(report.TotalDuration))} wall clock ({pct:F0}%). Model-based estimate from the observed ProjectReference DAG.</p>");
-        sb.AppendLine("<div class=\"cp-chain\">");
-        var nodes = report.CriticalPath.ToList();
-        for (int i = 0; i < nodes.Count; i++)
+        sb.AppendLine("<h2>Blocking chain</h2>");
+        sb.AppendLine("<p class=\"note\">The chain of dependent work that most limits how quickly the build can finish. Estimate — see Critical Path Validation below for confidence.</p>");
+        sb.AppendLine("<ol class=\"chain-list\">");
+        foreach (var p in report.CriticalPath.Take(MaxBlockingChainNodes))
         {
-            var p = nodes[i];
-            var sevClass = p.SelfTime.TotalSeconds >= 30 ? "" : (p.SelfTime.TotalSeconds >= 10 ? "sev-warn" : "sev-info");
-            sb.AppendLine($"""
-<div class="cp-node {sevClass}">
-  <div class="cp-name">{Esc(p.Name)}</div>
-  <div class="cp-self">{Esc(ConsoleReportRenderer.FormatDuration(p.SelfTime))} · {p.SelfPercent:F1}%</div>
-</div>
-""");
-            if (i < nodes.Count - 1)
-                sb.AppendLine("<div class=\"cp-arrow\">→</div>");
+            var reason = DominantCategoryPhrase(p);
+            sb.AppendLine($"<li><strong>{Esc(p.Name)}</strong> — {Esc(ConsoleReportRenderer.FormatDuration(p.SelfTime))} ({p.SelfPercent:F0}%)<span class=\"muted\"> — {Esc(reason)}</span></li>");
         }
-        sb.AppendLine("</div>");
-        sb.AppendLine($"<div class=\"cp-progress\"><div style=\"width:{Math.Min(100, pct):F1}%\"></div></div>");
+        sb.AppendLine("</ol>");
+        sb.AppendLine($"<p class=\"note\">Chain total: {Esc(ConsoleReportRenderer.FormatDuration(report.CriticalPathTotal))} of {Esc(ConsoleReportRenderer.FormatDuration(report.TotalDuration))} elapsed ({pctOfElapsed:F0}%).</p>");
     }
 
-    private static string F(double v) => v.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+    private static string DominantCategoryPhrase(ProjectTiming p)
+    {
+        if (p.CategoryBreakdown.Count == 0)
+            return p.KindHeuristic switch
+            {
+                ProjectKind.Test => "test project",
+                ProjectKind.Benchmark => "benchmark project",
+                _ => "—",
+            };
+        var topCat = p.CategoryBreakdown.OrderByDescending(kv => kv.Value).First().Key;
+        return topCat switch
+        {
+            TargetCategory.Compile => "compile",
+            TargetCategory.References => "reference resolution",
+            TargetCategory.SourceGen => "source generators",
+            TargetCategory.StaticWebAssets => "static web assets",
+            TargetCategory.Copy => "output copy",
+            TargetCategory.Restore => "restore",
+            _ => "other",
+        };
+    }
 
     /// <summary>
-    /// Escapes a string for safe embedding in a JS string literal inside a &lt;script&gt; element.
-    /// Escapes &lt; and &gt; as Unicode escapes so a value containing &lt;/script&gt; cannot
-    /// terminate the surrounding script tag (HTML parser is in raw-text mode in script context).
+    /// Top time consumers — table of top 8 projects by time-in-this-project-itself.
     /// </summary>
-    private static string JsEscape(string s) =>
-        s.Replace("\\", "\\\\")
-         .Replace("\"", "\\\"")
-         .Replace("\n", "\\n")
-         .Replace("\r", "")
-         .Replace("<", "\\u003c")
-         .Replace(">", "\\u003e")
-         .Replace("&", "\\u0026");
-
-    private static void AppendWhyIsThisSlow(StringBuilder sb, BuildReport report)
+    private static void AppendTopConsumers(StringBuilder sb, BuildReport report)
     {
-        if (report.ProjectDiagnoses.Count == 0) return;
+        if (report.Projects.Count == 0) return;
 
-        sb.AppendLine("<h2>Why Is This Slow?</h2>");
-        sb.AppendLine("<p class=\"note\">Factual one-paragraph synthesis per top project. No interpretation beyond measured data.</p>");
-        sb.AppendLine("<div class=\"analysis\">");
-        foreach (var d in report.ProjectDiagnoses)
+        var totalSelfMs = report.Projects.Sum(p => p.SelfTime.TotalMilliseconds);
+
+        sb.AppendLine("<h2>Top time consumers</h2>");
+        sb.AppendLine("<p class=\"note\">Time each project spends on its own work, not including time spent waiting on referenced projects.</p>");
+        sb.AppendLine("<table><thead><tr><th>Project</th><th class=\"right\">Time</th><th class=\"right\">% of total</th><th>Dominant</th></tr></thead><tbody>");
+        foreach (var p in report.Projects.Take(MaxTopConsumers))
         {
-            var badges = new List<string>();
-            if (d.OnCriticalPath) badges.Add("<span class=\"cat-badge cat-references\">critical path</span>");
-            if (d.IsSpanOutlier) badges.Add("<span class=\"cat-badge cat-uncategorized\">span outlier</span>");
-            var badgeHtml = badges.Count > 0 ? " " + string.Join(" ", badges) : "";
+            var pct = totalSelfMs > 0 ? p.SelfTime.TotalMilliseconds / totalSelfMs * 100 : 0;
             sb.AppendLine($"""
-<div class="finding severity-info" style="border-left-color:var(--cyan)">
-  <div><strong>{Esc(d.ProjectName)}</strong> — {Esc(ConsoleReportRenderer.FormatDuration(d.SelfTime))} ({d.SelfPercent:F1}%){badgeHtml}</div>
-  <div class="detail" style="margin-top:8px">{Esc(d.Summary)}</div>
+<tr>
+  <td>{Esc(p.Name)}</td>
+  <td class="right"><strong>{Esc(ConsoleReportRenderer.FormatDuration(p.SelfTime))}</strong></td>
+  <td class="right muted">{pct:F1}%</td>
+  <td class="muted">{Esc(DominantCategoryPhrase(p))}</td>
+</tr>
 """);
-            AppendPackagePanel(sb, d.Packages);
-            sb.AppendLine("</div>");
         }
-        sb.AppendLine("</div>");
+        sb.AppendLine("</tbody></table>");
     }
+
+    /// <summary>
+    /// Inspect next — short ranked list derived from the top findings' inspect targets.
+    /// Up to 5 entries, one sentence each, each naming a specific artifact.
+    /// </summary>
+    private static void AppendInspectNext(StringBuilder sb, BuildAnalysis? analysis)
+    {
+        if (analysis is null || analysis.Findings.Count == 0) return;
+
+        var ranked = analysis.Findings
+            .OrderBy(f => f.Severity switch
+            {
+                FindingSeverity.Critical => 0,
+                FindingSeverity.Warning => 1,
+                _ => 2,
+            })
+            .ThenByDescending(f => f.UpperBoundImpactPercent ?? 0)
+            .Select(f => f.InvestigationSuggestion)
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Distinct()
+            .Take(MaxInspectNext)
+            .ToList();
+        if (ranked.Count == 0) return;
+
+        sb.AppendLine("<h2>Inspect next</h2>");
+        sb.AppendLine("<ol class=\"inspect-list\">");
+        foreach (var s in ranked)
+            sb.AppendLine($"<li>{Esc(s)}</li>");
+        sb.AppendLine("</ol>");
+    }
+
+    /// <summary>
+    /// Per-project breakdown — only top 3 projects; max 5 tasks each; excludes cascade targets
+    /// whose time is work done in other projects (not the project they appear under).
+    /// </summary>
+    private static void AppendPerProjectBreakdown(StringBuilder sb, BuildReport report)
+    {
+        if (report.Projects.Count == 0) return;
+
+        sb.AppendLine("<h2>Per-project breakdown</h2>");
+        sb.AppendLine("<p class=\"note\">Top 3 projects by time. Tasks that report aggregated work from other projects (clean cascade, reference framework lookup) are excluded — they'd attribute the wrong cost.</p>");
+
+        foreach (var p in report.Projects.Take(3))
+        {
+            sb.AppendLine($"<h3 style=\"margin-top:16px; font-size:1rem\">{Esc(p.Name)} — {Esc(ConsoleReportRenderer.FormatDuration(p.SelfTime))} ({p.SelfPercent:F1}%)</h3>");
+
+            var tasks = report.TopTasks
+                .Where(t => string.Equals(t.ProjectName, p.Name, StringComparison.OrdinalIgnoreCase))
+                .Where(t => !IsCascadeTarget(t.TargetName))
+                .Take(5)
+                .ToList();
+            if (tasks.Count > 0)
+            {
+                sb.AppendLine("<table style=\"margin-bottom:6px\"><thead><tr><th>Task</th><th>Target</th><th class=\"right\">Time</th></tr></thead><tbody>");
+                foreach (var t in tasks)
+                    sb.AppendLine($"<tr><td><strong>{Esc(t.TaskName)}</strong></td><td class=\"muted\">{Esc(t.TargetName)}</td><td class=\"right\">{Esc(ConsoleReportRenderer.FormatDuration(t.SelfTime))}</td></tr>");
+                sb.AppendLine("</tbody></table>");
+            }
+
+            var diagnosis = report.ProjectDiagnoses.FirstOrDefault(d =>
+                string.Equals(d.ProjectName, p.Name, StringComparison.OrdinalIgnoreCase));
+            if (diagnosis?.Packages is not null)
+                AppendPackagePanel(sb, diagnosis.Packages);
+        }
+    }
+
+    private static readonly HashSet<string> CascadeTargetNames = new(StringComparer.Ordinal)
+    {
+        // These targets execute work across multiple projects; showing them as a single project's
+        // slowest task would be factually misleading (the time is work done in the referenced projects).
+        "CleanReferencedProjects",
+        "_GetProjectReferenceTargetFrameworkProperties",
+        "_GetCopyToOutputDirectoryItemsFromTransitiveProjectReferences",
+        "_GetProjectReferenceTargetFrameworkPropertiesFromSolution",
+    };
+
+    private static bool IsCascadeTarget(string targetName) =>
+        CascadeTargetNames.Contains(targetName);
 
     private static void AppendPackagePanel(StringBuilder sb, ProjectPackages? packages)
     {

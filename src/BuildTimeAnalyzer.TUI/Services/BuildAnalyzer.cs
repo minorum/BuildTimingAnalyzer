@@ -67,19 +67,17 @@ public static class BuildAnalyzer
         var findings = new List<AnalysisFinding>();
         var totalSelfMs = report.Projects.Sum(p => p.SelfTime.TotalMilliseconds);
 
+        // Kept findings name a specific project + measured number + concrete next step.
+        // Removed: LargestGap, SpanWaitingPattern, CriticalPathConcentration, WarningConcentration,
+        // BroadReferenceOverhead, OutlierTargets, ComInterfaceGenerator no-op — either too generic,
+        // duplicates the blocking chain, or "no action needed" (trivia, not findings).
         DetectLargestShare(report, findings);
-        DetectLargestGap(report, findings);
-        DetectOutlierTargets(report, findings);
         DetectCostlyResolvePackageAssets(report, findings);
-        DetectWarningConcentration(report, findings);
-        DetectBroadReferenceOverhead(report, findings);
-        DetectSpanWaitingPattern(report, findings);
-        DetectCriticalPathConcentration(report, totalSelfMs, findings);
         DetectTfmNegotiationOverhead(report, findings);
         DetectBenchmarksOnCriticalPath(report, findings);
         DetectWarningHeavyCriticalPath(report, findings);
         DetectGenLoggingOutlier(report, findings);
-        DetectComInterfaceGeneratorNoOp(report, findings);
+        DetectComInterfaceGeneratorWithUsages(report, findings);
         DetectCSharpAnalyzersInNonRoslynProject(report, findings);
         DetectHeavyTransitivesInTestOrBenchmark(report, findings);
 
@@ -101,9 +99,9 @@ public static class BuildAnalyzer
         for (int i = 0; i < findings.Count; i++)
             findings[i] = findings[i] with { Number = i + 1 };
 
-        var recommendations = GenerateRecommendations(findings, report);
-
-        return new BuildAnalysis { Findings = findings, Recommendations = recommendations };
+        // Recommendations removed: the per-finding InvestigationSuggestion is the action item,
+        // duplicating it in a separate section adds length without adding information.
+        return new BuildAnalysis { Findings = findings, Recommendations = [] };
     }
 
     // ──────────────────────────── Findings ────────────────────────────
@@ -115,25 +113,21 @@ public static class BuildAnalyzer
         var top = report.Projects[0];
         if (top.SelfPercent <= LargestShareWarningPct) return;
 
-        var isCritical = top.SelfPercent > LargestShareCriticalPct;
-        var severity = isCritical ? FindingSeverity.Critical : FindingSeverity.Warning;
-        var thresholdName = isCritical ? nameof(LargestShareCriticalPct) : nameof(LargestShareWarningPct);
-        var thresholdValue = isCritical ? LargestShareCriticalPct : LargestShareWarningPct;
-
-        var topTargets = top.Targets.Take(2).Select(t => $"{t.Name} ({Fmt(t.SelfTime)}, {CategoryLabel(t.Category)})").ToList();
-        var targetPhrase = topTargets.Count > 0 ? $" Top targets: {string.Join(", ", topTargets)}." : "";
+        var inspectTarget = top.Targets.Count > 0
+            ? $"{top.Name} — start with target {top.Targets[0].Name} ({Fmt(top.Targets[0].SelfTime)}, {CategoryLabel(top.Targets[0].Category)})"
+            : $"{top.Name}";
 
         findings.Add(new AnalysisFinding
         {
             Number = 0,
-            Title = $"Largest self-time share: {top.Name}",
-            Severity = severity,
+            Title = $"{top.Name} dominates build time",
+            Severity = top.SelfPercent > LargestShareCriticalPct ? FindingSeverity.Critical : FindingSeverity.Warning,
             Confidence = FindingConfidence.High,
-            Measured = $"{top.Name} accounts for {top.SelfPercent:F1}% of total self time ({Fmt(top.SelfTime)}).{targetPhrase}",
+            Measured = $"{top.Name}: {Fmt(top.SelfTime)} ({top.SelfPercent:F1}% of total).",
             LikelyExplanation = null,
-            InvestigationSuggestion = $"Profile {top.Name}'s top targets before deciding whether anything needs to change.",
+            InvestigationSuggestion = $"Inspect {inspectTarget}.",
             Evidence = $"SelfPercent={top.SelfPercent:F1}%, SelfTime={Fmt(top.SelfTime)}",
-            ThresholdName = $"{thresholdName}={thresholdValue:F0}%",
+            ThresholdName = $"top-project-share > {LargestShareWarningPct:F0}%",
             UpperBoundImpactPercent = top.SelfPercent,
         });
     }
@@ -221,15 +215,15 @@ public static class BuildAnalyzer
         findings.Add(new AnalysisFinding
         {
             Number = 0,
-            Title = $"Expensive ResolvePackageAssets: {costly.Count} project(s)",
+            Title = $"ResolvePackageAssets expensive in {costly.Count} project(s), slowest {max.ProjectName}: {Fmt(max.SelfTime)}",
             Severity = FindingSeverity.Warning,
             Confidence = FindingConfidence.High,
             UpperBoundImpactPercent = costly.Sum(c => c.SelfPercent),
-            Measured = $"{costly.Count} project(s) cross the {CostlyResolvePackageAssetsSeconds:F0}s threshold. Slowest: {max.ProjectName} at {Fmt(max.SelfTime)}.",
-            LikelyExplanation = "ResolvePackageAssets cost typically scales with the transitive NuGet graph size, but this is a correlation — not proof. High cost does not directly identify which packages are responsible.",
-            InvestigationSuggestion = "Run `dotnet nuget why` on heavy packages in the affected projects to locate transitive chains.",
+            Measured = $"Slowest: {max.ProjectName} at {Fmt(max.SelfTime)}. {costly.Count} project(s) cross the {CostlyResolvePackageAssetsSeconds:F0}s threshold.",
+            LikelyExplanation = null,
+            InvestigationSuggestion = $"Run `dotnet nuget why {max.ProjectName} <heavy-package>` on its largest direct packages to locate transitive chains.",
             Evidence = $"Max.SelfTime={Fmt(max.SelfTime)}, Count={costly.Count}",
-            ThresholdName = $"{nameof(CostlyResolvePackageAssetsSeconds)}={CostlyResolvePackageAssetsSeconds:F0}s",
+            ThresholdName = $"> {CostlyResolvePackageAssetsSeconds:F0}s",
         });
     }
 
@@ -363,27 +357,29 @@ public static class BuildAnalyzer
         if (totalMs < TfmNegotiationAggregateSecondsThreshold * 1000) return;
 
         var edges = report.Graph.Health.TotalEdges;
-        var longestChain = report.Graph.LongestChainProjectCount;
-        var projectCount = report.Projects.Count;
 
         findings.Add(new AnalysisFinding
         {
             Number = 0,
-            Title = "_GetProjectReferenceTargetFrameworkProperties overhead from deep dependency graph",
+            Title = $"Reference framework lookup runs {Fmt(TimeSpan.FromMilliseconds(totalMs))} across {edges} project edges",
             Severity = FindingSeverity.Warning,
-            Confidence = FindingConfidence.Medium,
-            Measured = $"Appears {tfmTasks.Count}x in top tasks, total ~{Fmt(TimeSpan.FromMilliseconds(totalMs))}. With {edges} edge(s) across {projectCount} project(s), this runs at least {edges} times.",
-            LikelyExplanation = $"This is the MSBuild two-phase TargetFramework negotiation protocol — for each ProjectReference, MSBuild asks the referenced project which TargetFramework to build as before resolving outputs. Cost scales with edge count in the dependency graph. A {longestChain}-project longest chain means up to {longestChain} sequential evaluations on the critical path.",
-            InvestigationSuggestion = "1) For ProjectReferences where cross-targeting is not needed, add `SkipGetTargetFrameworkProperties=\"true\"` metadata (automate via Directory.Build.targets for same-TFM projects). 2) Try static graph mode: `dotnet build -graph <solution>` — pre-computes the DAG and can skip runtime negotiation. 3) Excluding test/benchmark projects from the default build removes their reference edges and shrinks this overhead.",
-            Evidence = $"TfmNegotiationCount={tfmTasks.Count}, TotalTfmTime={Fmt(TimeSpan.FromMilliseconds(totalMs))}, Edges={edges}",
-            ThresholdName = $"{nameof(TfmNegotiationAggregateSecondsThreshold)}={TfmNegotiationAggregateSecondsThreshold:F0}s",
+            Confidence = FindingConfidence.High,
+            Measured = $"_GetProjectReferenceTargetFrameworkProperties total: {Fmt(TimeSpan.FromMilliseconds(totalMs))} across {edges} ProjectReference edges.",
+            LikelyExplanation = null,
+            InvestigationSuggestion = "Add `SkipGetTargetFrameworkProperties=\"true\"` to same-TFM ProjectReferences via Directory.Build.targets, or try `dotnet build -graph`.",
+            Evidence = $"TfmNegotiationTotal={Fmt(TimeSpan.FromMilliseconds(totalMs))}, Edges={edges}",
+            ThresholdName = $"total > {TfmNegotiationAggregateSecondsThreshold:F0}s",
         });
     }
 
     private static void DetectBenchmarksOnCriticalPath(BuildReport report, List<AnalysisFinding> findings)
     {
+        // Name-based classification is evidence, not proof — only emit when there's a specific
+        // project to point at with measurable time on the blocking chain.
         var testBench = report.CriticalPath
             .Where(p => p.KindHeuristic == ProjectKind.Test || p.KindHeuristic == ProjectKind.Benchmark)
+            .Where(p => p.SelfTime.TotalSeconds >= 10)
+            .OrderByDescending(p => p.SelfTime)
             .ToList();
         if (testBench.Count == 0) return;
 
@@ -392,19 +388,20 @@ public static class BuildAnalyzer
         var pct = totalSelfMs > 0 ? totalSelf / totalSelfMs * 100 : 0;
 
         var names = string.Join(", ", testBench.Select(p => $"{p.Name} ({Fmt(p.SelfTime)})"));
+        var top = testBench[0];
 
         findings.Add(new AnalysisFinding
         {
             Number = 0,
-            Title = $"{testBench.Count} test/benchmark project(s) on the critical path",
+            Title = $"Test/benchmark projects on the blocking chain: {testBench.Count} · {Fmt(TimeSpan.FromMilliseconds(totalSelf))}",
             Severity = FindingSeverity.Warning,
-            Confidence = FindingConfidence.Medium,
+            Confidence = FindingConfidence.High,
             UpperBoundImpactPercent = pct,
-            Measured = $"Projects on the critical path classified by name-based heuristic as test or benchmark: {names}. Combined self time: {Fmt(TimeSpan.FromMilliseconds(totalSelf))} ({pct:F1}% of total self time).",
-            LikelyExplanation = "Test and benchmark projects extend the critical path for every full-solution build, even though they are only needed when tests/benchmarks actually run. Excluding them from the default dev/CI build shortens wall-clock time without affecting production output.",
-            InvestigationSuggestion = "Option A — Solution Configuration: create a BuildOnly configuration that unchecks Tests/Benchmarks. Option B — edit the .sln directly, remove the .Build.0 entry for those project GUIDs under Debug|Any CPU. Option C — conditional `<ExcludeFromBuild>` property in the project, toggled by a `$(ExcludeBenchmarks)` flag. Measure before committing: the DAG topology matters, removing a leaf does nothing if it wasn't actually gating a dependency.",
+            Measured = $"On the blocking chain: {names}. Named classification — verify before excluding.",
+            LikelyExplanation = null,
+            InvestigationSuggestion = $"Inspect {top.Name} .sln entry; if only needed for test/benchmark runs, remove its .Build.0 line under Debug|Any CPU.",
             Evidence = $"TestBenchmarkOnPath={testBench.Count}, CombinedSelfTime={Fmt(TimeSpan.FromMilliseconds(totalSelf))}",
-            ThresholdName = "on critical path",
+            ThresholdName = "on blocking chain + self >= 10s",
         });
     }
 
@@ -416,25 +413,21 @@ public static class BuildAnalyzer
             .ToList();
         if (heavy.Count == 0) return;
 
-        var lines = string.Join(", ", heavy.Take(5).Select(p =>
-            $"{p.Name} ({p.WarningCount} warnings, {Fmt(p.SelfTime)} self)"));
-        var topPrefixes = report.WarningsByPrefix
-            .OrderByDescending(kv => kv.Value)
-            .Take(3)
-            .Select(kv => $"{kv.Key} {kv.Value}");
-        var prefixSummary = string.Join(" · ", topPrefixes);
+        var top = heavy[0];
+        var lines = string.Join(", ", heavy.Take(3).Select(p => $"{p.Name} ({p.WarningCount} warnings)"));
+        var topPrefix = report.WarningsByPrefix.OrderByDescending(kv => kv.Value).FirstOrDefault();
 
         findings.Add(new AnalysisFinding
         {
             Number = 0,
-            Title = $"{heavy.Count} warning-heavy project(s) on the critical path",
-            Severity = FindingSeverity.Critical,
+            Title = $"Warnings concentrated on the blocking chain: {lines}",
+            Severity = FindingSeverity.Warning,
             Confidence = FindingConfidence.High,
-            Measured = $"Critical path includes projects with high warning counts: {lines}. Solution-wide warning prefix breakdown: {prefixSummary}.",
-            LikelyExplanation = "CS nullable warnings (CS8600–CS8629) extend Roslyn's type-inference work on every compile because the analyzer must walk the type graph to compute flow state. CA warnings have lower per-build cost but indicate analyzers running in projects on the slow path.",
-            InvestigationSuggestion = "Fix the top-prefix warnings on critical-path projects first — they reduce both build time and warning noise. Use `dotnet build /warnaserror:CS8600` on a branch to force the fix on the most common nullable warnings.",
-            Evidence = $"WarningHeavyCount={heavy.Count}, TopByCount={heavy[0].Name}({heavy[0].WarningCount})",
-            ThresholdName = $"{nameof(WarningsOnCriticalPathMinPerProject)}={WarningsOnCriticalPathMinPerProject}",
+            Measured = $"Blocking-chain projects with >{WarningsOnCriticalPathMinPerProject} warnings each: {lines}. Most common warning prefix solution-wide: {topPrefix.Key} ({topPrefix.Value}).",
+            LikelyExplanation = null,
+            InvestigationSuggestion = $"Inspect warnings of type {topPrefix.Key} in {top.Name}. `dotnet build /warnaserror:{topPrefix.Key}` on a branch forces the fix.",
+            Evidence = $"TopProject={top.Name}({top.WarningCount}), TopPrefix={topPrefix.Key}={topPrefix.Value}",
+            ThresholdName = $"per-project warnings > {WarningsOnCriticalPathMinPerProject}",
         });
     }
 
@@ -470,24 +463,27 @@ public static class BuildAnalyzer
             .FirstOrDefault(n => string.Equals(n.ProjectName, top.Project?.Name, StringComparison.OrdinalIgnoreCase))
             ?.TransitiveDependentsCount ?? 0;
 
+        var projectName = top.Project?.Name ?? top.Report.ProjectName;
         findings.Add(new AnalysisFinding
         {
             Number = 0,
-            Title = $"Gen.Logging cost outlier in {top.Project?.Name ?? top.Report.ProjectName}",
+            Title = $"Gen.Logging dominates {projectName}: {Fmt(top.GenTime)} ({top.Share * 100:F0}% of its time)",
             Severity = FindingSeverity.Warning,
             Confidence = FindingConfidence.High,
             UpperBoundImpactPercent = top.Project?.SelfPercent,
-            Measured = $"{top.Project?.Name ?? top.Report.ProjectName}: Gen.Logging {Fmt(top.GenTime)} vs project self {Fmt(top.Project?.SelfTime ?? TimeSpan.Zero)} ({top.Share * 100:F0}%). Solution average for Gen.Logging: ~{Fmt(TimeSpan.FromMilliseconds(solutionAvgMs))}. Transitive dependents: {transitiveDependents}.",
-            LikelyExplanation = "Microsoft.Gen.Logging runs only when [LoggerMessage] attributes are present in the compilation unit. A project where its cost dominates self time either has heavy LoggerMessage usage or is unnecessarily pulling in Microsoft.Extensions.Telemetry.",
-            InvestigationSuggestion = $"Audit [LoggerMessage] usage in {top.Project?.Name ?? top.Report.ProjectName}. If genuinely needed, the cost is real. If not, find the package introducing Microsoft.Extensions.Telemetry (likely a shared abstractions library) and either drop the package or set <IncludeAssets>compile; runtime</IncludeAssets> on it.",
+            Measured = $"{projectName}: Gen.Logging {Fmt(top.GenTime)} vs project {Fmt(top.Project?.SelfTime ?? TimeSpan.Zero)}. Solution average for Gen.Logging: ~{Fmt(TimeSpan.FromMilliseconds(solutionAvgMs))}.",
+            LikelyExplanation = null,
+            InvestigationSuggestion = $"Inspect [LoggerMessage] usage in {projectName}. If absent, find and drop the Microsoft.Extensions.Telemetry reference pulling it in.",
             Evidence = $"GenLoggingTime={Fmt(top.GenTime)}, ProjectSelf={Fmt(top.Project?.SelfTime ?? TimeSpan.Zero)}, Share={top.Share * 100:F0}%",
-            ThresholdName = $"{nameof(GenLoggingOutlierMinSeconds)}={GenLoggingOutlierMinSeconds:F0}s & share>={GenLoggingOutlierProjectShareThreshold:F0}",
+            ThresholdName = $">{GenLoggingOutlierMinSeconds:F0}s and >{GenLoggingOutlierProjectShareThreshold * 100:F0}% of project",
         });
     }
 
-    private static void DetectComInterfaceGeneratorNoOp(BuildReport report, List<AnalysisFinding> findings)
+    private static void DetectComInterfaceGeneratorWithUsages(BuildReport report, List<AnalysisFinding> findings)
     {
-        if (report.AnalyzerReports.Count == 0) return;
+        // Only fire when [GeneratedComInterface] is actually used. The no-op case (ran but
+        // zero usages) is unavoidable SDK cost — not a finding, just trivia.
+        if (report.GeneratedComInterfaceUsages.Count == 0) return;
 
         var totalMs = report.AnalyzerReports
             .SelectMany(r => r.Generators)
@@ -495,29 +491,18 @@ public static class BuildAnalyzer
             .Sum(g => g.Time.TotalMilliseconds);
         if (totalMs < ComInterfaceGeneratorMinSecondsForFinding * 1000) return;
 
-        var projectsRunningIt = report.AnalyzerReports
-            .Count(r => r.Generators.Any(g => KnownComInterfaceGeneratorAssemblies.Contains(g.AssemblyName)));
-        var usagesFound = report.GeneratedComInterfaceUsages.Count;
-        var isConfirmedNoOp = usagesFound == 0;
-
-        var conclusion = isConfirmedNoOp
-            ? "0 usages of [GeneratedComInterface] found in source files — confirmed no-op. Cost is unavoidable without modifying SDK targets."
-            : $"Usages of [GeneratedComInterface] found in: {string.Join(", ", report.GeneratedComInterfaceUsages.Take(5))}{(usagesFound > 5 ? ", …" : "")} — generator is doing real work in those projects.";
-
+        var usages = string.Join(", ", report.GeneratedComInterfaceUsages.Take(5))
+                     + (report.GeneratedComInterfaceUsages.Count > 5 ? ", …" : "");
         findings.Add(new AnalysisFinding
         {
             Number = 0,
-            Title = $"ComInterfaceGenerator: {Fmt(TimeSpan.FromMilliseconds(totalMs))} CPU across {projectsRunningIt} project(s) — {(isConfirmedNoOp ? "confirmed no-op" : $"{usagesFound} project(s) actually using it")}",
-            Severity = isConfirmedNoOp ? FindingSeverity.Info : FindingSeverity.Warning,
+            Title = $"ComInterfaceGenerator runs {Fmt(TimeSpan.FromMilliseconds(totalMs))} total across {report.GeneratedComInterfaceUsages.Count} project(s) with [GeneratedComInterface]",
+            Severity = FindingSeverity.Warning,
             Confidence = FindingConfidence.High,
-            Measured = $"Microsoft.Interop.ComInterfaceGenerator ran in {projectsRunningIt} project(s) for {Fmt(TimeSpan.FromMilliseconds(totalMs))} CPU-summed. {conclusion}",
-            LikelyExplanation = isConfirmedNoOp
-                ? "ComInterfaceGenerator ships with the .NET SDK and runs in every project regardless of whether [GeneratedComInterface] is used. The work is genuinely no-op when no attributes are present, but the generator is still loaded and given a chance to scan."
-                : "Cost is justified — generator is producing P/Invoke marshalling code in the listed projects.",
-            InvestigationSuggestion = isConfirmedNoOp
-                ? "No action needed. The generator cannot be disabled without modifying SDK targets. Consider this a baseline cost of using .NET 8+ SDK."
-                : "Verify usages are intentional. ComInterfaceGenerator-emitted code can be inspected via -p:EmitCompilerGeneratedFiles=true.",
-            Evidence = $"ComInterfaceGenCpu={Fmt(TimeSpan.FromMilliseconds(totalMs))}, Projects={projectsRunningIt}, AttributeUsages={usagesFound}",
+            Measured = $"Projects using [GeneratedComInterface]: {usages}. Total summed generator time: {Fmt(TimeSpan.FromMilliseconds(totalMs))}.",
+            LikelyExplanation = null,
+            InvestigationSuggestion = $"Verify usages are intentional in: {usages}. Emitted code can be inspected with -p:EmitCompilerGeneratedFiles=true.",
+            Evidence = $"ComInterfaceGenTotal={Fmt(TimeSpan.FromMilliseconds(totalMs))}, AttributeUsages={report.GeneratedComInterfaceUsages.Count}",
             ThresholdName = $"{nameof(ComInterfaceGeneratorMinSecondsForFinding)}={ComInterfaceGeneratorMinSecondsForFinding:F0}s",
         });
     }
@@ -539,16 +524,15 @@ public static class BuildAnalyzer
             findings.Add(new AnalysisFinding
             {
                 Number = 0,
-                Title = $"Roslyn compiler analyzer running in {ar.ProjectName}",
+                Title = $"Roslyn compiler analyzer running in {ar.ProjectName}: {Fmt(TimeSpan.FromMilliseconds(csTime))}",
                 Severity = FindingSeverity.Warning,
-                Confidence = FindingConfidence.Medium,
-                Measured = $"{ar.ProjectName} runs Microsoft.CodeAnalysis.CSharp.Analyzers for {Fmt(TimeSpan.FromMilliseconds(csTime))} ({pct:F1}% of solution analyzer time).",
-                LikelyExplanation = "Microsoft.CodeAnalysis.CSharp.Analyzers targets Roslyn-extension projects (analyzer/source-generator authors). In a regular application or library, it is almost certainly being pulled in transitively by a package that doesn't actually need it.",
-                InvestigationSuggestion = "Find the introducing package with `dotnet nuget why <project> Microsoft.CodeAnalysis.CSharp.Analyzers`. Then on the introducing PackageReference, set `<IncludeAssets>compile; runtime</IncludeAssets>` to keep the package's library code without pulling in its analyzers.",
+                Confidence = FindingConfidence.High,
+                Measured = $"{ar.ProjectName}: Microsoft.CodeAnalysis.CSharp.Analyzers runs for {Fmt(TimeSpan.FromMilliseconds(csTime))} ({pct:F1}% of solution analyzer time). This analyzer targets Roslyn-extension projects, not application code.",
+                LikelyExplanation = null,
+                InvestigationSuggestion = $"Run `dotnet nuget why {ar.ProjectName} Microsoft.CodeAnalysis.CSharp.Analyzers`. On the introducing PackageReference, set <IncludeAssets>compile; runtime</IncludeAssets>.",
                 Evidence = $"CSharpAnalyzersTime={Fmt(TimeSpan.FromMilliseconds(csTime))}, ShareOfAnalyzerTime={pct:F1}%",
-                ThresholdName = $"{nameof(CSharpAnalyzersInNonRoslynMinSeconds)}={CSharpAnalyzersInNonRoslynMinSeconds:F0}s",
+                ThresholdName = $"> {CSharpAnalyzersInNonRoslynMinSeconds:F0}s",
             });
-            // One finding per offending project — don't double up across the analyzer table.
         }
     }
 
@@ -581,12 +565,12 @@ public static class BuildAnalyzer
             findings.Add(new AnalysisFinding
             {
                 Number = 0,
-                Title = $"Heavy production packages in non-production project: {d.ProjectName}",
+                Title = $"{d.ProjectName} pulls in heavy production packages: {heavyAll.Count}",
                 Severity = FindingSeverity.Warning,
-                Confidence = FindingConfidence.Medium,
-                Measured = $"{d.ProjectName} ({(project.KindHeuristic == ProjectKind.Test ? "test" : "benchmark")}) pulls in heavy package(s): {heavyList}. Total transitive package count: {d.Packages.TransitivePackages.Count}.{introducedBy}",
-                LikelyExplanation = "Test and benchmark projects that depend on production packages inherit their full source-generator and analyzer cost. Replacing the production reference with a contracts/abstractions project (or a production project that doesn't have the heavy generator) keeps compile-time-only data without the runtime/generator weight.",
-                InvestigationSuggestion = "Inspect the direct ProjectReferences of this project. Replace any reference to a heavy production project with a reference to its contracts/abstractions project, or use <IncludeAssets>compile</IncludeAssets> on the introducing PackageReference.",
+                Confidence = FindingConfidence.High,
+                Measured = $"{d.ProjectName} ({(project.KindHeuristic == ProjectKind.Test ? "test" : "benchmark")}): heavy package(s) {heavyList}.{introducedBy}",
+                LikelyExplanation = null,
+                InvestigationSuggestion = $"Inspect direct ProjectReferences of {d.ProjectName}. Replace heavy refs with contracts/abstractions, or use <IncludeAssets>compile</IncludeAssets>.",
                 Evidence = $"HeavyPackages={heavyAll.Count}, TransitiveTotal={d.Packages.TransitivePackages.Count}",
                 ThresholdName = "test/benchmark + heavy package present",
             });
