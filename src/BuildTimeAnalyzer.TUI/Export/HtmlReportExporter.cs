@@ -125,11 +125,16 @@ public static class HtmlReportExporter
   <div class="stat"><div class="label">Errors</div><div class="value {{(report.ErrorCount > 0 ? "red" : "")}}">{{report.ErrorCount}}</div></div>
   <div class="stat">
     <div class="label">Warnings</div>
-    <div class="value {{(report.WarningCount > 0 ? "yellow" : "")}}">{{report.WarningCount}} total</div>
+    <div class="value muted">{{report.WarningCount}} total</div>
     <div class="sub">{{report.AttributedWarningCount}} attributed &middot; {{report.UnattributedWarningCount}} unattributed</div>
   </div>
 </div>
 """);
+
+        // ── Most actionable content surfaces first ──
+        AppendTopSuspects(sb, analysis);
+        AppendAnalysisSection(sb, analysis);
+        AppendWhyIsThisSlow(sb, report);
 
         // Build context
         var ctxRows = BuildContextRows(report);
@@ -237,6 +242,15 @@ public static class HtmlReportExporter
             }
             sb.AppendLine("</tbody></table>");
             sb.AppendLine($"<p class=\"note\">Path total: {Esc(ConsoleReportRenderer.FormatDuration(report.CriticalPathTotal))} of {Esc(ConsoleReportRenderer.FormatDuration(report.TotalDuration))} wall clock.</p>");
+
+            var testBenchOnPath = report.CriticalPath
+                .Where(p => p.KindHeuristic == ProjectKind.Test || p.KindHeuristic == ProjectKind.Benchmark)
+                .ToList();
+            if (testBenchOnPath.Count > 0)
+            {
+                var names = string.Join(", ", testBenchOnPath.Select(p => Esc(p.Name)));
+                sb.AppendLine($"<p class=\"note\" style=\"color:var(--yellow)\">Note: {testBenchOnPath.Count} test/benchmark project(s) on this path ({names}). If your goal is faster <em>production</em> builds (CI / dev inner loop without running tests), exclude these from the optimisation target — their cost only matters when they actually run.</p>");
+            }
         }
 
         // Category totals
@@ -268,7 +282,7 @@ public static class HtmlReportExporter
         if (report.AnalyzerReports.Count > 0)
         {
             sb.AppendLine("<h2>Analyzer &amp; Generator Timing</h2>");
-            sb.AppendLine("<p class=\"note\">Per-project breakdown from -p:ReportAnalyzer=true. Times are CPU-summed (may exceed Csc wall time on multi-core). Compiler-proper time ≈ Csc wall − max(analyzer, generator) — approximate due to concurrency.</p>");
+            sb.AppendLine("<p class=\"note\">Per-project breakdown from -p:ReportAnalyzer=true. Analyzer/Generator times are CPU-summed across threads and can exceed Csc wall time on multi-core machines, so they are <em>not directly subtractable</em> from wall time. Treat them as relative cost signals between projects, not absolute compiler-proper measurements.</p>");
             sb.AppendLine("<table><thead><tr><th>Project</th><th class=\"right\">Csc Wall</th><th class=\"right\">Analyzer Time</th><th class=\"right\">Generator Time</th><th class=\"right\">Analyzers</th><th class=\"right\">Generators</th></tr></thead><tbody>");
             foreach (var ar in report.AnalyzerReports.OrderByDescending(a => a.TotalAnalyzerTime + a.TotalGeneratorTime))
             {
@@ -474,28 +488,6 @@ public static class HtmlReportExporter
         }
         sb.AppendLine("</tbody></table>");
 
-        // Project Diagnoses ("Why is this slow?")
-        if (report.ProjectDiagnoses.Count > 0)
-        {
-            sb.AppendLine("<h2>Why Is This Slow?</h2>");
-            sb.AppendLine("<p class=\"note\">Factual one-paragraph synthesis per top project. No interpretation beyond measured data.</p>");
-            sb.AppendLine("<div class=\"analysis\">");
-            foreach (var d in report.ProjectDiagnoses)
-            {
-                var badges = new List<string>();
-                if (d.OnCriticalPath) badges.Add("<span class=\"cat-badge cat-references\">critical path</span>");
-                if (d.IsSpanOutlier) badges.Add("<span class=\"cat-badge cat-uncategorized\">span outlier</span>");
-                var badgeHtml = badges.Count > 0 ? " " + string.Join(" ", badges) : "";
-                sb.AppendLine($"""
-<div class="finding severity-info" style="border-left-color:var(--cyan)">
-  <div><strong>{Esc(d.ProjectName)}</strong> — {Esc(ConsoleReportRenderer.FormatDuration(d.SelfTime))} ({d.SelfPercent:F1}%){badgeHtml}</div>
-  <div class="detail" style="margin-top:8px">{Esc(d.Summary)}</div>
-</div>
-""");
-            }
-            sb.AppendLine("</div>");
-        }
-
         // Targets table
         if (report.TopTargets.Count > 0)
         {
@@ -564,45 +556,6 @@ public static class HtmlReportExporter
             sb.AppendLine("</tbody></table>");
         }
 
-        // Analysis section with layered findings
-        if (analysis is { Findings.Count: > 0 })
-        {
-            sb.AppendLine("<h2>Analysis</h2>");
-            sb.AppendLine("<p class=\"note\">Findings are structured as <strong>Measured</strong> (facts), <strong>Likely explanation</strong> (heuristic hypothesis when present), and <strong>Investigate</strong> (next step).</p>");
-            sb.AppendLine("<div class=\"analysis\">");
-            foreach (var f in analysis.Findings)
-            {
-                var sevClass = f.Severity switch
-                {
-                    FindingSeverity.Critical => "severity-critical",
-                    FindingSeverity.Warning => "severity-warning",
-                    _ => "severity-info",
-                };
-                sb.AppendLine($"""
-<div class="finding {sevClass}">
-  <div><span class="num">{f.Number}.</span><span class="title">{Esc(f.Title)}</span></div>
-  <div class="layer layer-measured"><span class="layer-label">Measured</span><span class="layer-value">{Esc(f.Measured)}</span></div>
-""");
-                if (!string.IsNullOrEmpty(f.LikelyExplanation))
-                    sb.AppendLine($"  <div class=\"layer layer-likely\"><span class=\"layer-label\">Likely</span><span class=\"layer-value\">{Esc(f.LikelyExplanation)}</span></div>");
-                sb.AppendLine($"  <div class=\"layer layer-investigate\"><span class=\"layer-label\">Investigate</span><span class=\"layer-value\">{Esc(f.InvestigationSuggestion)}</span></div>");
-                var confLabel = f.Confidence switch { FindingConfidence.High => "high", FindingConfidence.Medium => "medium", _ => "low" };
-                var confColor = f.Confidence switch { FindingConfidence.High => "green", FindingConfidence.Medium => "yellow", _ => "muted" };
-                var impactText = f.UpperBoundImpactPercent is { } pct ? $" &nbsp; · &nbsp; Upper bound: up to {pct:F1}% of total self time" : "";
-                sb.AppendLine($"  <div class=\"evidence\">Confidence: <span class=\"{confColor}\">{confLabel}</span>{impactText} &nbsp; · &nbsp; Evidence: {Esc(f.Evidence)} &nbsp; · &nbsp; Threshold: {Esc(f.ThresholdName)}</div>");
-                sb.AppendLine("</div>");
-            }
-
-            if (analysis.Recommendations.Count > 0)
-            {
-                sb.AppendLine("<h3 style=\"margin-top:24px\">Recommendations</h3>");
-                sb.AppendLine("<p class=\"note\">These are investigations to run, not conclusions. Architecture decisions require more than timing data.</p>");
-                foreach (var r in analysis.Recommendations)
-                    sb.AppendLine($"<div class=\"recommendation\"><span class=\"num\">{r.Number}.</span>{Esc(r.Text)}</div>");
-            }
-            sb.AppendLine("</div>");
-        }
-
         sb.AppendLine($"<footer>Generated by BuildTimeAnalyzer on {DateTime.Now:yyyy-MM-dd HH:mm:ss}</footer>");
         sb.AppendLine("</body></html>");
 
@@ -622,6 +575,97 @@ public static class HtmlReportExporter
             .Select(kv => $"{CategoryLabel(kv.Key)} {kv.Value.TotalMilliseconds / totalMs * 100:F0}%");
 
         return string.Join(", ", parts);
+    }
+
+    private static void AppendTopSuspects(StringBuilder sb, BuildAnalysis? analysis)
+    {
+        if (analysis is null) return;
+        // Promote Critical and Warning findings, ranked by upper-bound impact then severity.
+        var ranked = analysis.Findings
+            .Where(f => f.Severity != FindingSeverity.Info)
+            .OrderByDescending(f => f.Severity == FindingSeverity.Critical ? 1 : 0)
+            .ThenByDescending(f => f.UpperBoundImpactPercent ?? 0)
+            .Take(3)
+            .ToList();
+        if (ranked.Count == 0) return;
+
+        sb.AppendLine("<h2>Top Suspects</h2>");
+        sb.AppendLine("<p class=\"note\">Highest-impact findings at a glance. Full Analysis section below has the evidence and next steps.</p>");
+        sb.AppendLine("<div class=\"analysis\">");
+        foreach (var f in ranked)
+        {
+            var sevColor = f.Severity == FindingSeverity.Critical ? "var(--red)" : "var(--yellow)";
+            var impact = f.UpperBoundImpactPercent is { } pct ? $" <span class=\"muted\">· up to {pct:F1}% of total self time</span>" : "";
+            sb.AppendLine($"""
+<div style="margin: 6px 0; padding-left: 10px; border-left: 3px solid {sevColor}">
+  <strong>{Esc(f.Title)}</strong>{impact}
+</div>
+""");
+        }
+        sb.AppendLine("</div>");
+    }
+
+    private static void AppendAnalysisSection(StringBuilder sb, BuildAnalysis? analysis)
+    {
+        if (analysis is null || analysis.Findings.Count == 0) return;
+
+        sb.AppendLine("<h2>Analysis</h2>");
+        sb.AppendLine("<p class=\"note\">Findings are structured as <strong>Measured</strong> (facts), <strong>Likely explanation</strong> (heuristic hypothesis when present), and <strong>Investigate</strong> (next step).</p>");
+        sb.AppendLine("<div class=\"analysis\">");
+        foreach (var f in analysis.Findings)
+        {
+            var sevClass = f.Severity switch
+            {
+                FindingSeverity.Critical => "severity-critical",
+                FindingSeverity.Warning => "severity-warning",
+                _ => "severity-info",
+            };
+            sb.AppendLine($"""
+<div class="finding {sevClass}">
+  <div><span class="num">{f.Number}.</span><span class="title">{Esc(f.Title)}</span></div>
+  <div class="layer layer-measured"><span class="layer-label">Measured</span><span class="layer-value">{Esc(f.Measured)}</span></div>
+""");
+            if (!string.IsNullOrEmpty(f.LikelyExplanation))
+                sb.AppendLine($"  <div class=\"layer layer-likely\"><span class=\"layer-label\">Likely</span><span class=\"layer-value\">{Esc(f.LikelyExplanation)}</span></div>");
+            sb.AppendLine($"  <div class=\"layer layer-investigate\"><span class=\"layer-label\">Investigate</span><span class=\"layer-value\">{Esc(f.InvestigationSuggestion)}</span></div>");
+            var confLabel = f.Confidence switch { FindingConfidence.High => "high", FindingConfidence.Medium => "medium", _ => "low" };
+            var confColor = f.Confidence switch { FindingConfidence.High => "green", FindingConfidence.Medium => "yellow", _ => "muted" };
+            var impactText = f.UpperBoundImpactPercent is { } pct ? $" &nbsp; · &nbsp; Upper bound: up to {pct:F1}% of total self time" : "";
+            sb.AppendLine($"  <div class=\"evidence\">Confidence: <span class=\"{confColor}\">{confLabel}</span>{impactText} &nbsp; · &nbsp; Evidence: {Esc(f.Evidence)} &nbsp; · &nbsp; Threshold: {Esc(f.ThresholdName)}</div>");
+            sb.AppendLine("</div>");
+        }
+
+        if (analysis.Recommendations.Count > 0)
+        {
+            sb.AppendLine("<h3 style=\"margin-top:24px\">Recommendations</h3>");
+            sb.AppendLine("<p class=\"note\">These are investigations to run, not conclusions. Architecture decisions require more than timing data.</p>");
+            foreach (var r in analysis.Recommendations)
+                sb.AppendLine($"<div class=\"recommendation\"><span class=\"num\">{r.Number}.</span>{Esc(r.Text)}</div>");
+        }
+        sb.AppendLine("</div>");
+    }
+
+    private static void AppendWhyIsThisSlow(StringBuilder sb, BuildReport report)
+    {
+        if (report.ProjectDiagnoses.Count == 0) return;
+
+        sb.AppendLine("<h2>Why Is This Slow?</h2>");
+        sb.AppendLine("<p class=\"note\">Factual one-paragraph synthesis per top project. No interpretation beyond measured data.</p>");
+        sb.AppendLine("<div class=\"analysis\">");
+        foreach (var d in report.ProjectDiagnoses)
+        {
+            var badges = new List<string>();
+            if (d.OnCriticalPath) badges.Add("<span class=\"cat-badge cat-references\">critical path</span>");
+            if (d.IsSpanOutlier) badges.Add("<span class=\"cat-badge cat-uncategorized\">span outlier</span>");
+            var badgeHtml = badges.Count > 0 ? " " + string.Join(" ", badges) : "";
+            sb.AppendLine($"""
+<div class="finding severity-info" style="border-left-color:var(--cyan)">
+  <div><strong>{Esc(d.ProjectName)}</strong> — {Esc(ConsoleReportRenderer.FormatDuration(d.SelfTime))} ({d.SelfPercent:F1}%){badgeHtml}</div>
+  <div class="detail" style="margin-top:8px">{Esc(d.Summary)}</div>
+</div>
+""");
+        }
+        sb.AppendLine("</div>");
     }
 
     private static List<(string Key, string Value)> BuildContextRows(BuildReport report)
