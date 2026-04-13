@@ -36,6 +36,14 @@ public static class BuildAnalyzer
 
     private const int SpanOutliersMinCountForFinding = 3;
 
+    // Rebuild / clean detection
+    private const int CleanTaskCountThreshold = 3;
+
+    // TFM negotiation overhead — cost aggregates across many ProjectReference edges
+    private const double TfmNegotiationAggregateSecondsThreshold = 120;
+    private const string TfmNegotiationTarget = "_GetProjectReferenceTargetFrameworkProperties";
+    private const string CleanReferencedProjectsTarget = "CleanReferencedProjects";
+
     public static BuildAnalysis Analyze(BuildReport report)
     {
         if (report.TotalDuration < TimeSpan.FromSeconds(1))
@@ -44,6 +52,7 @@ public static class BuildAnalyzer
         var findings = new List<AnalysisFinding>();
         var totalSelfMs = report.Projects.Sum(p => p.SelfTime.TotalMilliseconds);
 
+        DetectRebuildPhase(report, findings);
         DetectLargestShare(report, findings);
         DetectLargestGap(report, findings);
         DetectOutlierTargets(report, findings);
@@ -52,6 +61,8 @@ public static class BuildAnalyzer
         DetectBroadReferenceOverhead(report, findings);
         DetectSpanWaitingPattern(report, findings);
         DetectCriticalPathConcentration(report, totalSelfMs, findings);
+        DetectTfmNegotiationOverhead(report, findings);
+        DetectBenchmarksOnCriticalPath(report, findings);
 
         // Severity order: Critical first, then Warning, then Info.
         // Keep detection order within a severity so consecutive runs produce stable numbering.
@@ -319,6 +330,90 @@ public static class BuildAnalyzer
             InvestigationSuggestion = "Treat the path as a candidate list for sequential-ordering investigation. Verify that the dependency extraction looks right (graph health section) before using it to prioritise work.",
             Evidence = $"CriticalPathTotal={Fmt(report.CriticalPathTotal)}, CriticalPathPct={cpPct:F1}%, NodeCount={report.CriticalPath.Count}",
             ThresholdName = $"{nameof(CriticalPathMinInterestingPct)}={CriticalPathMinInterestingPct:F0}%",
+        });
+    }
+
+    private static void DetectRebuildPhase(BuildReport report, List<AnalysisFinding> findings)
+    {
+        var cleanTasks = report.TopTasks
+            .Where(t => string.Equals(t.TargetName, CleanReferencedProjectsTarget, StringComparison.Ordinal))
+            .ToList();
+        var cleanTaskCount = cleanTasks.Count;
+        var totalCleanMs = cleanTasks.Sum(t => t.SelfTime.TotalMilliseconds);
+        var buildMode = report.Context.BuildMode ?? "";
+        var noIncremental = buildMode.Contains("--no-incremental", StringComparison.OrdinalIgnoreCase)
+                            || buildMode.Contains("Rebuild", StringComparison.OrdinalIgnoreCase);
+
+        if (cleanTaskCount < CleanTaskCountThreshold && !noIncremental) return;
+
+        var projectCount = report.Projects.Count;
+        findings.Add(new AnalysisFinding
+        {
+            Number = 0,
+            Title = "Build includes a clean phase — wall-clock time is inflated",
+            Severity = FindingSeverity.Critical,
+            Confidence = FindingConfidence.High,
+            Measured = $"CleanReferencedProjects appears {cleanTaskCount}x in top tasks, consuming ~{Fmt(TimeSpan.FromMilliseconds(totalCleanMs))} of MSBuild task time. Build mode: {buildMode}.",
+            LikelyExplanation = $"`dotnet build --no-incremental` maps to MSBuild /t:Rebuild, which runs Clean before Build. CleanReferencedProjects cascades through all {projectCount} project references in the DAG.",
+            InvestigationSuggestion = "Re-run the same build without --no-incremental to measure the steady-state cost: `dotnet build <solution>`. If a guaranteed clean output is required, separate the phases explicitly: `dotnet clean <solution> && dotnet build --no-restore`. The clean pass is not free and should be a conscious choice, not a default.",
+            Evidence = $"CleanReferencedProjectsTaskCount={cleanTaskCount}, TotalCleanTime={Fmt(TimeSpan.FromMilliseconds(totalCleanMs))}, BuildMode={buildMode}",
+            ThresholdName = $"{nameof(CleanTaskCountThreshold)}={CleanTaskCountThreshold}",
+        });
+    }
+
+    private static void DetectTfmNegotiationOverhead(BuildReport report, List<AnalysisFinding> findings)
+    {
+        var tfmTasks = report.TopTasks
+            .Where(t => string.Equals(t.TargetName, TfmNegotiationTarget, StringComparison.Ordinal))
+            .ToList();
+        if (tfmTasks.Count == 0) return;
+
+        var totalMs = tfmTasks.Sum(t => t.SelfTime.TotalMilliseconds);
+        if (totalMs < TfmNegotiationAggregateSecondsThreshold * 1000) return;
+
+        var edges = report.Graph.Health.TotalEdges;
+        var longestChain = report.Graph.LongestChainProjectCount;
+        var projectCount = report.Projects.Count;
+
+        findings.Add(new AnalysisFinding
+        {
+            Number = 0,
+            Title = "_GetProjectReferenceTargetFrameworkProperties overhead from deep dependency graph",
+            Severity = FindingSeverity.Warning,
+            Confidence = FindingConfidence.Medium,
+            Measured = $"Appears {tfmTasks.Count}x in top tasks, total ~{Fmt(TimeSpan.FromMilliseconds(totalMs))}. With {edges} edge(s) across {projectCount} project(s), this runs at least {edges} times.",
+            LikelyExplanation = $"This is the MSBuild two-phase TargetFramework negotiation protocol — for each ProjectReference, MSBuild asks the referenced project which TargetFramework to build as before resolving outputs. Cost scales with edge count in the dependency graph. A {longestChain}-project longest chain means up to {longestChain} sequential evaluations on the critical path.",
+            InvestigationSuggestion = "1) For ProjectReferences where cross-targeting is not needed, add `SkipGetTargetFrameworkProperties=\"true\"` metadata (automate via Directory.Build.targets for same-TFM projects). 2) Try static graph mode: `dotnet build -graph <solution>` — pre-computes the DAG and can skip runtime negotiation. 3) Excluding test/benchmark projects from the default build removes their reference edges and shrinks this overhead.",
+            Evidence = $"TfmNegotiationCount={tfmTasks.Count}, TotalTfmTime={Fmt(TimeSpan.FromMilliseconds(totalMs))}, Edges={edges}",
+            ThresholdName = $"{nameof(TfmNegotiationAggregateSecondsThreshold)}={TfmNegotiationAggregateSecondsThreshold:F0}s",
+        });
+    }
+
+    private static void DetectBenchmarksOnCriticalPath(BuildReport report, List<AnalysisFinding> findings)
+    {
+        var testBench = report.CriticalPath
+            .Where(p => p.KindHeuristic == ProjectKind.Test || p.KindHeuristic == ProjectKind.Benchmark)
+            .ToList();
+        if (testBench.Count == 0) return;
+
+        var totalSelf = testBench.Sum(p => p.SelfTime.TotalMilliseconds);
+        var totalSelfMs = report.Projects.Sum(p => p.SelfTime.TotalMilliseconds);
+        var pct = totalSelfMs > 0 ? totalSelf / totalSelfMs * 100 : 0;
+
+        var names = string.Join(", ", testBench.Select(p => $"{p.Name} ({Fmt(p.SelfTime)})"));
+
+        findings.Add(new AnalysisFinding
+        {
+            Number = 0,
+            Title = $"{testBench.Count} test/benchmark project(s) on the critical path",
+            Severity = FindingSeverity.Warning,
+            Confidence = FindingConfidence.Medium,
+            UpperBoundImpactPercent = pct,
+            Measured = $"Projects on the critical path classified by name-based heuristic as test or benchmark: {names}. Combined self time: {Fmt(TimeSpan.FromMilliseconds(totalSelf))} ({pct:F1}% of total self time).",
+            LikelyExplanation = "Test and benchmark projects extend the critical path for every full-solution build, even though they are only needed when tests/benchmarks actually run. Excluding them from the default dev/CI build shortens wall-clock time without affecting production output.",
+            InvestigationSuggestion = "Option A — Solution Configuration: create a BuildOnly configuration that unchecks Tests/Benchmarks. Option B — edit the .sln directly, remove the .Build.0 entry for those project GUIDs under Debug|Any CPU. Option C — conditional `<ExcludeFromBuild>` property in the project, toggled by a `$(ExcludeBenchmarks)` flag. Measure before committing: the DAG topology matters, removing a leaf does nothing if it wasn't actually gating a dependency.",
+            Evidence = $"TestBenchmarkOnPath={testBench.Count}, CombinedSelfTime={Fmt(TimeSpan.FromMilliseconds(totalSelf))}",
+            ThresholdName = "on critical path",
         });
     }
 
