@@ -22,6 +22,17 @@ public static class AnalyzerReportParser
 {
     public static AnalyzerReport? Parse(string projectName, TimeSpan cscWallTime, IReadOnlyList<string> messages)
     {
+        // Roslyn often emits the entire ReportAnalyzer block as a single multi-line BuildMessage.
+        // Flatten everything to per-line entries so the section/total/entry detection works
+        // regardless of whether messages arrive line-by-line or as one big string.
+        var lines = new List<string>(messages.Count * 4);
+        foreach (var msg in messages)
+        {
+            if (string.IsNullOrEmpty(msg)) continue;
+            foreach (var part in msg.Split('\n'))
+                lines.Add(part.TrimEnd('\r'));
+        }
+
         var analyzers = new List<AnalyzerEntry>();
         var generators = new List<AnalyzerEntry>();
         TimeSpan totalAnalyzerTime = TimeSpan.Zero;
@@ -29,20 +40,20 @@ public static class AnalyzerReportParser
 
         bool foundAny = false;
 
-        for (int i = 0; i < messages.Count; i++)
+        for (int i = 0; i < lines.Count; i++)
         {
-            var line = messages[i];
+            var line = lines[i];
             if (line.Contains("Total analyzer execution time:", StringComparison.OrdinalIgnoreCase))
             {
                 totalAnalyzerTime = ParseTotalLine(line);
                 foundAny = true;
-                ParseEntries(messages, i + 1, analyzers);
+                ParseEntries(lines, i + 1, analyzers);
             }
             else if (line.Contains("Total generator execution time:", StringComparison.OrdinalIgnoreCase))
             {
                 totalGeneratorTime = ParseTotalLine(line);
                 foundAny = true;
-                ParseEntries(messages, i + 1, generators);
+                ParseEntries(lines, i + 1, generators);
             }
         }
 
