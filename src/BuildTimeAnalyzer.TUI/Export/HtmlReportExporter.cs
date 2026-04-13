@@ -279,11 +279,67 @@ public static class HtmlReportExporter
             }
         }
 
-        // Analyzer / Generator Reports
+        // Source Generator Cost (Solution-Wide) — aggregates generator cost across all projects
+        // so it's visible as a single cost story rather than scattered across per-project rows.
         if (report.AnalyzerReports.Count > 0)
         {
-            sb.AppendLine("<h2>Analyzer &amp; Generator Timing</h2>");
-            sb.AppendLine("<p class=\"note\">Per-project breakdown from -p:ReportAnalyzer=true. Analyzer/Generator times are CPU-summed across threads and can exceed Csc wall time on multi-core machines, so they are <em>not directly subtractable</em> from wall time. Treat them as relative cost signals between projects, not absolute compiler-proper measurements.</p>");
+            var totalSelfMsForGens = report.Projects.Sum(p => p.SelfTime.TotalMilliseconds);
+            var generatorTotals = report.AnalyzerReports
+                .SelectMany(r => r.Generators.Select(g => (Report: r, Entry: g)))
+                .GroupBy(x => x.Entry.AssemblyName)
+                .Select(g => new
+                {
+                    Name = g.Key,
+                    Total = TimeSpan.FromMilliseconds(g.Sum(x => x.Entry.Time.TotalMilliseconds)),
+                    Projects = g.Select(x => x.Report.ProjectName).Distinct().Count(),
+                })
+                .Where(x => x.Total.TotalMilliseconds >= 100)
+                .OrderByDescending(x => x.Total)
+                .ToList();
+
+            if (generatorTotals.Count > 0)
+            {
+                var grandTotal = TimeSpan.FromMilliseconds(generatorTotals.Sum(x => x.Total.TotalMilliseconds));
+                var grandPct = totalSelfMsForGens > 0 ? grandTotal.TotalMilliseconds / totalSelfMsForGens * 100 : 0;
+
+                sb.AppendLine("<h2>Source Generator Cost (Solution-Wide)</h2>");
+                sb.AppendLine("<p class=\"note\">Generators aggregated across all projects. Cost is CPU-summed — a generator running in 20 projects in parallel contributes up to 20x its per-project time. The <em>% of Self</em> column compares against total project self time, so values above ~5% are meaningful.</p>");
+                sb.AppendLine("<table><thead><tr><th class=\"right\">#</th><th>Generator</th><th class=\"right\">Total Time</th><th class=\"right\">Projects</th><th class=\"right\">% of Self</th></tr></thead><tbody>");
+                int gRank = 1;
+                foreach (var g in generatorTotals.Take(15))
+                {
+                    var pct = totalSelfMsForGens > 0 ? g.Total.TotalMilliseconds / totalSelfMsForGens * 100 : 0;
+                    var timeClass = g.Total.TotalSeconds > 10 ? "yellow" : "";
+                    sb.AppendLine($"""
+<tr>
+  <td class="right rank">{gRank++}</td>
+  <td><strong>{Esc(g.Name)}</strong></td>
+  <td class="right {timeClass}"><strong>{Esc(ConsoleReportRenderer.FormatDuration(g.Total))}</strong></td>
+  <td class="right muted">{g.Projects}</td>
+  <td class="right muted">{pct:F1}%</td>
+</tr>
+""");
+                }
+                sb.AppendLine($"""
+<tr>
+  <td></td>
+  <td class="muted"><em>TOTAL (top {Math.Min(15, generatorTotals.Count)})</em></td>
+  <td class="right"><strong>{Esc(ConsoleReportRenderer.FormatDuration(grandTotal))}</strong></td>
+  <td></td>
+  <td class="right muted">{grandPct:F1}%</td>
+</tr>
+""");
+                sb.AppendLine("</tbody></table>");
+                sb.AppendLine("<p class=\"note\"><strong>Known SDK-default generators:</strong> <code>Microsoft.Interop.ComInterfaceGenerator</code> and <code>Microsoft.Interop.JSImportGenerator</code> ship with the .NET SDK and run in every project regardless of whether any <code>[GeneratedComInterface]</code> or <code>[JSImport]</code> attributes are present — they cannot be disabled without modifying SDK targets. <code>Microsoft.Gen.Metrics</code> and <code>Microsoft.Gen.Logging</code> come from <code>Microsoft.Extensions.Telemetry</code>; projects that do not use <code>[LoggerMessage]</code> or <code>[Meter]</code> source generation should not reference that package.</p>");
+            }
+        }
+
+        // Analyzer / Generator Reports (per-project, collapsed by default)
+        if (report.AnalyzerReports.Count > 0)
+        {
+            sb.AppendLine("<h2>Per-Project Analyzer &amp; Generator Breakdown</h2>");
+            sb.AppendLine("<p class=\"note\">Per-project detail from -p:ReportAnalyzer=true. Times are CPU-summed (may exceed Csc wall time on multi-core). Treat them as relative cost signals between projects, not absolute compiler-proper measurements.</p>");
+            sb.AppendLine("<details><summary class=\"muted\" style=\"cursor:pointer; padding:8px 0\">Show per-project breakdown</summary>");
             sb.AppendLine("<table><thead><tr><th>Project</th><th class=\"right\">Csc Wall</th><th class=\"right\">Analyzer Time</th><th class=\"right\">Generator Time</th><th class=\"right\">Analyzers</th><th class=\"right\">Generators</th></tr></thead><tbody>");
             foreach (var ar in report.AnalyzerReports.OrderByDescending(a => a.TotalAnalyzerTime + a.TotalGeneratorTime))
             {
@@ -335,6 +391,7 @@ public static class HtmlReportExporter
                 }
             }
             sb.AppendLine("</tbody></table>");
+            sb.AppendLine("</details>");
         }
 
         // Reference overhead
