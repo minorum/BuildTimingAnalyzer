@@ -593,7 +593,20 @@ public sealed class LogAnalyzer
             .OrderByDescending(t => t.Count)
             .ToList();
 
-        var comInterfaceUsages = SourceAttributeScanner.FindGeneratedComInterfaceUsages(projectList);
+        // Scanning every project's .cs files is expensive on large solutions. The
+        // [GeneratedComInterface] usage check only matters where the ComInterfaceGenerator actually
+        // ran (per ReportAnalyzer), so restrict the walk to those projects — and skip it entirely
+        // when the generator is absent from the whole build.
+        var comGeneratorProjects = new HashSet<string>(
+            analyzerReports
+                .Where(r => r.Generators.Any(g => string.Equals(
+                    g.AssemblyName, "Microsoft.Interop.ComInterfaceGenerator", StringComparison.OrdinalIgnoreCase)))
+                .Select(r => r.ProjectName),
+            StringComparer.OrdinalIgnoreCase);
+        var comInterfaceUsages = comGeneratorProjects.Count == 0
+            ? (IReadOnlyList<string>)Array.Empty<string>()
+            : SourceAttributeScanner.FindGeneratedComInterfaceUsages(
+                projectList.Where(p => comGeneratorProjects.Contains(p.Name)));
 
         return new BuildReport
         {

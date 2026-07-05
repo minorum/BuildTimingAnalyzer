@@ -329,11 +329,6 @@ public sealed record AnalyzerEntry
 }
 
 /// <summary>
-/// "Why is this slow?" synthesis for a single project. Pulls together task breakdown,
-/// category composition, analyzer/generator cost, graph position, and span/self pattern
-/// into one compact explanation.
-/// </summary>
-/// <summary>
 /// Quality of package/reference data attached to a project. Reflects what the resolver
 /// actually had access to on disk — the reader can judge the report accordingly.
 /// </summary>
@@ -367,6 +362,11 @@ public sealed record ProjectPackages
     public required IReadOnlyList<string> ProjectReferences { get; init; }
 }
 
+/// <summary>
+/// "Why is this slow?" synthesis for a single project. Pulls together task breakdown,
+/// category composition, analyzer/generator cost, graph position, and span/self pattern
+/// into one compact explanation.
+/// </summary>
 public sealed record ProjectDiagnosis
 {
     public required string ProjectName { get; init; }
