@@ -9,20 +9,14 @@ public static class HtmlReportExporter
 {
     public static void Export(BuildReport report, string outputPath, int topN, BuildAnalysis? analysis = null)
     {
-        var html = BuildHtml(report, topN, analysis);
+        var html = BuildHtml(report, analysis);
         File.WriteAllText(outputPath, html, Encoding.UTF8);
     }
 
-    private static string BuildHtml(BuildReport report, int topN, BuildAnalysis? analysis)
+    private static string BuildHtml(BuildReport report, BuildAnalysis? analysis)
     {
         var sb = new StringBuilder();
-        var statusClass = report.Succeeded ? "success" : "fail";
         var statusText = report.Succeeded ? "Build Succeeded" : "Build Failed";
-
-        var hasCriticalPath = report.CriticalPath.Count > 0 && report.CriticalPathTotal > TimeSpan.Zero;
-        var criticalSet = hasCriticalPath
-            ? new HashSet<string>(report.CriticalPath.Select(p => p.FullPath), StringComparer.OrdinalIgnoreCase)
-            : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         sb.AppendLine($$"""
 <!DOCTYPE html>
@@ -327,14 +321,16 @@ public static class HtmlReportExporter
 
             if (generatorTotals.Count > 0)
             {
-                var grandTotal = TimeSpan.FromMilliseconds(generatorTotals.Sum(x => x.Total.TotalMilliseconds));
+                // TOTAL must reflect only the rows actually shown, or the column won't add up.
+                var shownGenerators = generatorTotals.Take(15).ToList();
+                var grandTotal = TimeSpan.FromMilliseconds(shownGenerators.Sum(x => x.Total.TotalMilliseconds));
                 var grandPct = totalSelfMsForGens > 0 ? grandTotal.TotalMilliseconds / totalSelfMsForGens * 100 : 0;
 
                 sb.AppendLine("<details class=\"section\"><summary><span class=\"arrow\">▶</span><h2>Source generators (solution-wide)</h2></summary>");
                 sb.AppendLine("<p class=\"note\">Generators aggregated across all projects. Total summed across threads — may exceed elapsed time on multi-core.</p>");
                 sb.AppendLine("<table><thead><tr><th class=\"right\">#</th><th>Generator</th><th class=\"right\">Total Time</th><th class=\"right\">Projects</th><th class=\"right\">% of Self</th></tr></thead><tbody>");
                 int gRank = 1;
-                foreach (var g in generatorTotals.Take(15))
+                foreach (var g in shownGenerators)
                 {
                     var pct = totalSelfMsForGens > 0 ? g.Total.TotalMilliseconds / totalSelfMsForGens * 100 : 0;
                     var timeClass = g.Total.TotalSeconds > 10 ? "yellow" : "";
@@ -351,7 +347,7 @@ public static class HtmlReportExporter
                 sb.AppendLine($"""
 <tr>
   <td></td>
-  <td class="muted"><em>TOTAL (top {Math.Min(15, generatorTotals.Count)})</em></td>
+  <td class="muted"><em>TOTAL (top {shownGenerators.Count})</em></td>
   <td class="right"><strong>{Esc(ConsoleReportRenderer.FormatDuration(grandTotal))}</strong></td>
   <td></td>
   <td class="right muted">{grandPct:F1}%</td>
@@ -490,6 +486,9 @@ public static class HtmlReportExporter
         // Warnings by Category
         if (report.WarningsByCode.Count > 0)
         {
+            // One grouping produces both the per-category Count and its TopCodes. This is the same
+            // rollup as report.WarningsByPrefix (count-only) — both group by the shared t.Prefix, so
+            // they cannot diverge; we group here because this view additionally needs TopCodes.
             var byPrefix = report.WarningsByCode
                 .GroupBy(t => t.Prefix)
                 .Select(g => new
@@ -558,6 +557,17 @@ public static class HtmlReportExporter
     // "What to inspect next — 5 items max."
     private const int MaxInspectNext = 5;
 
+    // Shared finding ranking: Critical → Warning → Info, then by upper-bound impact descending.
+    private static IEnumerable<AnalysisFinding> RankFindings(BuildAnalysis analysis) =>
+        analysis.Findings
+            .OrderBy(f => f.Severity switch
+            {
+                FindingSeverity.Critical => 0,
+                FindingSeverity.Warning => 1,
+                _ => 2,
+            })
+            .ThenByDescending(f => f.UpperBoundImpactPercent ?? 0);
+
     /// <summary>
     /// Top bottlenecks section — strict three-line format per finding:
     /// title with the measured number, one sentence of why, and an inspect line.
@@ -566,16 +576,7 @@ public static class HtmlReportExporter
     {
         if (analysis is null || analysis.Findings.Count == 0) return;
 
-        var ranked = analysis.Findings
-            .OrderBy(f => f.Severity switch
-            {
-                FindingSeverity.Critical => 0,
-                FindingSeverity.Warning => 1,
-                _ => 2,
-            })
-            .ThenByDescending(f => f.UpperBoundImpactPercent ?? 0)
-            .Take(MaxBottlenecks)
-            .ToList();
+        var ranked = RankFindings(analysis).Take(MaxBottlenecks).ToList();
 
         sb.AppendLine("<h2>Top bottlenecks</h2>");
         foreach (var f in ranked)
@@ -626,16 +627,8 @@ public static class HtmlReportExporter
                 _ => "—",
             };
         var topCat = p.CategoryBreakdown.OrderByDescending(kv => kv.Value).First().Key;
-        return topCat switch
-        {
-            TargetCategory.Compile => "compile",
-            TargetCategory.References => "reference resolution",
-            TargetCategory.SourceGen => "source generators",
-            TargetCategory.StaticWebAssets => "static web assets",
-            TargetCategory.Copy => "output copy",
-            TargetCategory.Restore => "restore",
-            _ => "other",
-        };
+        // Route through the single category-label source so this phrase can't drift from the rest.
+        return CategoryLabel(topCat);
     }
 
     /// <summary>
@@ -673,14 +666,7 @@ public static class HtmlReportExporter
     {
         if (analysis is null || analysis.Findings.Count == 0) return;
 
-        var ranked = analysis.Findings
-            .OrderBy(f => f.Severity switch
-            {
-                FindingSeverity.Critical => 0,
-                FindingSeverity.Warning => 1,
-                _ => 2,
-            })
-            .ThenByDescending(f => f.UpperBoundImpactPercent ?? 0)
+        var ranked = RankFindings(analysis)
             .Select(f => f.InvestigationSuggestion)
             .Where(s => !string.IsNullOrWhiteSpace(s))
             .Distinct()
@@ -704,7 +690,7 @@ public static class HtmlReportExporter
         if (report.Projects.Count == 0) return;
 
         sb.AppendLine("<h2>Per-project breakdown</h2>");
-        sb.AppendLine("<p class=\"note\">Top 3 projects by time. Tasks that report aggregated work from other projects (clean cascade, reference framework lookup) are excluded — they'd attribute the wrong cost.</p>");
+        sb.AppendLine("<p class=\"note\">Top 3 projects by time, up to 5 leaf tasks each. MSBuild/CallTarget orchestration wrappers are already excluded from task timing; the few remaining cross-project cascade targets are dropped here so their cost isn't attributed to the wrong project.</p>");
 
         foreach (var p in report.Projects.Take(3))
         {

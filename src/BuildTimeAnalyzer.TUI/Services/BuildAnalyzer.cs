@@ -22,7 +22,6 @@ public static class BuildAnalyzer
 
     // TFM negotiation overhead — cost aggregates across many ProjectReference edges
     private const double TfmNegotiationAggregateSecondsThreshold = 120;
-    private const string TfmNegotiationTarget = "_GetProjectReferenceTargetFrameworkProperties";
 
     // Generator anomalies
     private const double GenLoggingOutlierMinSeconds = 5;
@@ -142,12 +141,9 @@ public static class BuildAnalyzer
 
     private static void DetectTfmNegotiationOverhead(BuildReport report, List<AnalysisFinding> findings)
     {
-        var tfmTasks = report.TopTasks
-            .Where(t => string.Equals(t.TargetName, TfmNegotiationTarget, StringComparison.Ordinal))
-            .ToList();
-        if (tfmTasks.Count == 0) return;
-
-        var totalMs = tfmTasks.Sum(t => t.SelfTime.TotalMilliseconds);
+        // Sourced from the orchestration-task total for _GetProjectReferenceTargetFrameworkProperties
+        // (LogAnalyzer.TfmNegotiationTotal) — that work is an MSBuild task and never appears in TopTasks.
+        var totalMs = report.TfmNegotiationTotal.TotalMilliseconds;
         if (totalMs < TfmNegotiationAggregateSecondsThreshold * 1000) return;
 
         var edges = report.Graph.Health.TotalEdges;
@@ -334,10 +330,10 @@ public static class BuildAnalyzer
                 Number = 0,
                 Title = $"Roslyn compiler analyzer running in {ar.ProjectName}: {Fmt(TimeSpan.FromMilliseconds(csTime))}",
                 Severity = FindingSeverity.Warning,
-                Confidence = FindingConfidence.High,
-                Measured = $"{ar.ProjectName}: Microsoft.CodeAnalysis.CSharp.Analyzers runs for {Fmt(TimeSpan.FromMilliseconds(csTime))} ({pct:F1}% of solution analyzer time). This analyzer targets Roslyn-extension projects, not application code.",
-                LikelyExplanation = null,
-                InvestigationSuggestion = $"Run `dotnet nuget why {ar.ProjectName} Microsoft.CodeAnalysis.CSharp.Analyzers`. On the introducing PackageReference, set <IncludeAssets>compile; runtime</IncludeAssets>.",
+                Confidence = FindingConfidence.Medium,
+                Measured = $"{ar.ProjectName}: Microsoft.CodeAnalysis.CSharp.Analyzers runs for {Fmt(TimeSpan.FromMilliseconds(csTime))} ({pct:F1}% of solution analyzer time).",
+                LikelyExplanation = "This analyzer ships with the Roslyn SDK and is expected in projects that build Roslyn analyzers/source generators. In an ordinary application project it usually arrives transitively and adds compile cost for no benefit — but this finding cannot tell the two apart from timing alone.",
+                InvestigationSuggestion = $"First confirm {ar.ProjectName} is not itself a Roslyn analyzer/source-generator project. If it is application code, run `dotnet nuget why {ar.ProjectName} Microsoft.CodeAnalysis.CSharp.Analyzers` to find what pulls it in.",
                 Evidence = $"CSharpAnalyzersTime={Fmt(TimeSpan.FromMilliseconds(csTime))}, ShareOfAnalyzerTime={pct:F1}%",
                 ThresholdName = $"> {CSharpAnalyzersInNonRoslynMinSeconds:F0}s",
             });

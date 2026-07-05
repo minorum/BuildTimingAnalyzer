@@ -70,6 +70,21 @@ public static class AnalyzerReportParser
         };
     }
 
+    // ReportAnalyzer numbers use '.' as the decimal separator when the compiler runs in English
+    // (BuildRunner pins DOTNET_CLI_UI_LANGUAGE=en). Defensive fallback for binlogs produced elsewhere
+    // under a comma-decimal culture: retry with ',' normalised to '.'. These fields never carry a
+    // thousands separator, so the swap is unambiguous.
+    private static bool TryParseNumber(string s, out double value)
+    {
+        s = s.Trim();
+        if (double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out value)) return true;
+        if (s.IndexOf(',') >= 0 &&
+            double.TryParse(s.Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out value))
+            return true;
+        value = 0;
+        return false;
+    }
+
     private static TimeSpan ParseTotalLine(string line)
     {
         // "Total analyzer execution time: 12.345 seconds."
@@ -79,7 +94,7 @@ public static class AnalyzerReportParser
         var spaceIdx = afterColon.IndexOf(' ');
         if (spaceIdx < 0) return TimeSpan.Zero;
         var numStr = afterColon[..spaceIdx];
-        if (double.TryParse(numStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds))
+        if (TryParseNumber(numStr, out var seconds))
             return TimeSpan.FromSeconds(seconds);
         return TimeSpan.Zero;
     }
@@ -112,9 +127,9 @@ public static class AnalyzerReportParser
         var parts = trimmed.Split((char[]?)null, 3, StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length < 3) return null;
 
-        if (!double.TryParse(parts[0].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds))
+        if (!TryParseNumber(parts[0], out var seconds))
             return null;
-        if (!double.TryParse(parts[1].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var percent))
+        if (!TryParseNumber(parts[1], out var percent))
         {
             // "<1" case
             if (parts[1].Trim().StartsWith("<"))

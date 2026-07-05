@@ -65,6 +65,7 @@ public static class JsonReportExporter
             Count = w.Count,
         }).ToList(),
         GeneratedComInterfaceUsages = report.GeneratedComInterfaceUsages.ToList(),
+        TfmNegotiationTotalMs = (long)report.TfmNegotiationTotal.TotalMilliseconds,
         AnalyzerReports = report.AnalyzerReports.Select(ToAnalyzerReportDto).ToList(),
         ProjectDiagnoses = report.ProjectDiagnoses.Select(ToProjectDiagnosisDto).ToList(),
         CategoryTotals = report.CategoryTotals.ToDictionary(
@@ -296,6 +297,7 @@ internal sealed class JsonReportDto
     public required List<JsonSkipDto> SkipReasons { get; init; }
     public required List<JsonWarningCodeDto> WarningsByCode { get; init; }
     public required List<string> GeneratedComInterfaceUsages { get; init; }
+    public required long TfmNegotiationTotalMs { get; init; }
     public required List<JsonAnalyzerReportDto> AnalyzerReports { get; init; }
     public required List<JsonProjectDiagnosisDto> ProjectDiagnoses { get; init; }
     public required Dictionary<string, long> CategoryTotals { get; init; }

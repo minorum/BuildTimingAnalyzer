@@ -55,8 +55,16 @@ public sealed record BuildReport
     // Dependency graph
     public required DependencyGraph Graph { get; init; }
 
-    // Task-level timing (all tasks, not just orchestration)
+    // Task-level timing (leaf tasks only; MSBuild/CallTarget orchestration wrappers excluded)
     public required IReadOnlyList<TaskTiming> TopTasks { get; init; }
+
+    /// <summary>
+    /// Total MSBuild-task time spent under <c>_GetProjectReferenceTargetFrameworkProperties</c>
+    /// (reference TFM negotiation), summed across ProjectReference edges. This is orchestration-task
+    /// time (excluded from <see cref="TopTasks"/>), surfaced here for the TFM-negotiation finding.
+    /// Zero when not populated.
+    /// </summary>
+    public TimeSpan TfmNegotiationTotal { get; init; }
 
     // Incremental build signal — per-target skip reasons
     public required IReadOnlyList<TargetSkipInfo> SkipReasons { get; init; }

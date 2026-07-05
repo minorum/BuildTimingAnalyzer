@@ -538,12 +538,11 @@ public sealed class LogAnalyzer
                     CategoryBreakdown = breakdown,
                 };
             }
+            var projectByPath = projectList
+                .GroupBy(p => p.FullPath, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
             criticalPath = criticalPath
-                .Select(cp =>
-                    projectList.FirstOrDefault(p =>
-                        string.Equals(p.FullPath, cp.FullPath, StringComparison.OrdinalIgnoreCase)
-                    ) ?? cp
-                )
+                .Select(cp => projectByPath.GetValueOrDefault(cp.FullPath) ?? cp)
                 .ToList();
         }
 
@@ -552,6 +551,14 @@ public sealed class LogAnalyzer
         var targetNameLookup = new Dictionary<(int ProjectInstanceId, int TargetId), string>();
         foreach (var t in targetTimings)
             targetNameLookup.TryAdd((t.ProjectInstanceId, t.Id), t.Name);
+
+        // Total MSBuild-task time under _GetProjectReferenceTargetFrameworkProperties (reference TFM
+        // negotiation). This work is an orchestration task, deliberately kept out of the leaf-task list,
+        // so surface it explicitly for the TFM-negotiation finding.
+        var tfmNegotiationTotal = TimeSpan.FromMilliseconds(
+            orchTaskDurations
+                .Where(kv => targetNameLookup.GetValueOrDefault(kv.Key) == "_GetProjectReferenceTargetFrameworkProperties")
+                .Sum(kv => kv.Value.TotalMilliseconds));
 
         var completedTasks = allRawTasks.Where(t => t.EndTime > t.StartTime).ToList();
         var totalTaskMs = completedTasks.Sum(t => t.Duration.TotalMilliseconds);
@@ -624,6 +631,7 @@ public sealed class LogAnalyzer
             Projects = projectList,
             TopTargets = topTargetList,
             TopTasks = topTaskList,
+            TfmNegotiationTotal = tfmNegotiationTotal,
             SkipReasons = skipInfos,
             AnalyzerReports = analyzerReports,
             ProjectDiagnoses = projectDiagnoses,
