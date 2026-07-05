@@ -83,7 +83,7 @@ public sealed class Throbber : IAsyncDisposable
         _cts.Cancel();
         try { await _loop; } catch { }
 
-        var elapsed = FormatElapsed(_stopwatch.Elapsed);
+        var elapsed = ConsoleReportRenderer.FormatDuration(_stopwatch.Elapsed);
         var suffix = doneSuffix is { Length: > 0 } ? $" — {doneSuffix}" : "";
 
         if (_animate)
@@ -105,11 +105,4 @@ public sealed class Throbber : IAsyncDisposable
     }
 
     public async ValueTask DisposeAsync() => await StopAsync();
-
-    private static string FormatElapsed(TimeSpan ts) =>
-        ts.TotalSeconds < 1
-            ? $"{ts.TotalMilliseconds:F0}ms"
-            : ts.TotalSeconds < 60
-                ? $"{ts.TotalSeconds:F1}s"
-                : $"{(int)ts.TotalMinutes}m {ts.Seconds:D2}s";
 }

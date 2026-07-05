@@ -395,17 +395,23 @@ public sealed class LogAnalyzer
             {
                 var best = g.OrderByDescending(x => x.ExclusiveTime).First();
                 var span = projectWorkSpans.GetValueOrDefault(best.Acc.FullPath);
+                // Sum exclusive time across every instance that shares this path. A
+                // multi-targeted project runs one inner build per TFM (distinct
+                // ProjectInstanceId, same path) and each does real work, so the project's
+                // self time is their sum. Taking only the largest instance would undercount
+                // and clash with totalSelfMs, which sums all instances (the denominator below).
+                var selfTime = TimeSpan.FromMilliseconds(g.Sum(x => x.ExclusiveTime.TotalMilliseconds));
                 return new ProjectTiming
                 {
                     Name = best.Acc.Name,
                     FullPath = best.Acc.FullPath,
-                    SelfTime = best.ExclusiveTime,
+                    SelfTime = selfTime,
                     Succeeded = g.All(x => x.Acc.Succeeded),
                     ErrorCount = g.Sum(x => x.Acc.ErrorCount),
                     WarningCount = g.Sum(x => x.Acc.WarningCount),
                     SelfPercent =
                         totalSelfMs > 0
-                            ? best.ExclusiveTime.TotalMilliseconds / totalSelfMs * 100
+                            ? selfTime.TotalMilliseconds / totalSelfMs * 100
                             : 0,
                     StartOffset = span.First,
                     EndOffset = span.Last,
@@ -422,14 +428,17 @@ public sealed class LogAnalyzer
             .Select(g =>
             {
                 var best = g.OrderByDescending(t => t.ExclusiveDuration).First();
+                // Sum across TFM instances: the same target (e.g. CoreCompile) runs once per
+                // inner build, and the denominator totalSelfMs counts every one of them.
+                var selfTime = TimeSpan.FromMilliseconds(g.Sum(t => t.ExclusiveDuration.TotalMilliseconds));
                 return new TargetTiming
                 {
                     Name = best.Name,
                     ProjectName = best.ProjectName,
-                    SelfTime = best.ExclusiveDuration,
+                    SelfTime = selfTime,
                     SelfPercent =
                         totalSelfMs > 0
-                            ? best.ExclusiveDuration.TotalMilliseconds / totalSelfMs * 100
+                            ? selfTime.TotalMilliseconds / totalSelfMs * 100
                             : 0,
                     Category = TargetCategorizer.Categorize(best.Name),
                 };
@@ -524,14 +533,18 @@ public sealed class LogAnalyzer
 
             for (int i = 0; i < projectList.Count; i++)
             {
-                if (!drillDownPaths.Contains(projectList[i].FullPath))
-                    continue;
-                var targets =
-                    targetsByProjectName.GetValueOrDefault(projectList[i].Name)
-                    ?? new List<TargetTiming>();
+                // CategoryBreakdown is a cheap lookup into the already-built categoryByProject
+                // map, so populate it for every project — the Top Consumers table renders more
+                // projects than the drill-down set, and its "Dominant" column reads this map
+                // (a blank cell would otherwise appear for consumers ranked below the top N).
+                // The heavier per-project Targets list stays scoped to the drill-down set.
                 var breakdown =
                     categoryByProject.GetValueOrDefault(projectList[i].Name)
                     ?? new Dictionary<TargetCategory, TimeSpan>();
+                var targets = drillDownPaths.Contains(projectList[i].FullPath)
+                    ? targetsByProjectName.GetValueOrDefault(projectList[i].Name)
+                      ?? new List<TargetTiming>()
+                    : projectList[i].Targets;
                 projectList[i] = projectList[i] with
                 {
                     Targets = targets,
@@ -552,12 +565,19 @@ public sealed class LogAnalyzer
         foreach (var t in targetTimings)
             targetNameLookup.TryAdd((t.ProjectInstanceId, t.Id), t.Name);
 
-        // Total MSBuild-task time under _GetProjectReferenceTargetFrameworkProperties (reference TFM
-        // negotiation). This work is an orchestration task, deliberately kept out of the leaf-task list,
-        // so surface it explicitly for the TFM-negotiation finding.
+        // Total MSBuild-task time under the reference TFM-negotiation targets
+        // (_GetProjectReferenceTargetFrameworkProperties and its FromSolution sibling). This work is
+        // an orchestration task, deliberately kept out of the leaf-task list, so surface it explicitly
+        // for the TFM-negotiation finding. Both variants must be counted or solution-driven builds
+        // (which emit the FromSolution form) under-report.
         var tfmNegotiationTotal = TimeSpan.FromMilliseconds(
             orchTaskDurations
-                .Where(kv => targetNameLookup.GetValueOrDefault(kv.Key) == "_GetProjectReferenceTargetFrameworkProperties")
+                .Where(kv =>
+                {
+                    var name = targetNameLookup.GetValueOrDefault(kv.Key);
+                    return name == "_GetProjectReferenceTargetFrameworkProperties"
+                        || name == "_GetProjectReferenceTargetFrameworkPropertiesFromSolution";
+                })
                 .Sum(kv => kv.Value.TotalMilliseconds));
 
         var completedTasks = allRawTasks.Where(t => t.EndTime > t.StartTime).ToList();
@@ -587,6 +607,11 @@ public sealed class LogAnalyzer
             var report = AnalyzerReportParser.Parse(acc.ProjectName, cscWallTime, acc.Messages);
             if (report is not null) analyzerReports.Add(report);
         }
+        // Merge per-TFM reports into one per project. A multi-targeted project emits one
+        // ReportAnalyzer block per inner build (same ProjectName); without merging, every
+        // consumer that keys by name — ProjectDiagnosisBuilder, the analyzer/generator findings,
+        // the JSON export — would drop all but one TFM (last-writer-wins) or emit split duplicates.
+        analyzerReports = MergeAnalyzerReportsByProject(analyzerReports);
 
         // ── Project diagnoses ("Why is this slow?") ──
         var projectDiagnoses = ProjectDiagnosisBuilder.Build(
@@ -722,6 +747,38 @@ public sealed class LogAnalyzer
             set.Add(resolved);
         }
     }
+
+    // Collapse the per-inner-build (per-TFM) ReportAnalyzer blocks of each project into a single
+    // report, so a multi-targeted project is not split across duplicate rows or reduced to one TFM.
+    private static List<AnalyzerReport> MergeAnalyzerReportsByProject(List<AnalyzerReport> reports) =>
+        reports
+            .GroupBy(r => r.ProjectName, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.Count() == 1
+                ? g.First()
+                : new AnalyzerReport
+                {
+                    ProjectName = g.Key,
+                    TotalAnalyzerTime = TimeSpan.FromMilliseconds(g.Sum(r => r.TotalAnalyzerTime.TotalMilliseconds)),
+                    TotalGeneratorTime = TimeSpan.FromMilliseconds(g.Sum(r => r.TotalGeneratorTime.TotalMilliseconds)),
+                    CscWallTime = TimeSpan.FromMilliseconds(g.Sum(r => r.CscWallTime.TotalMilliseconds)),
+                    Analyzers = MergeAnalyzerEntries(g.SelectMany(r => r.Analyzers)),
+                    Generators = MergeAnalyzerEntries(g.SelectMany(r => r.Generators)),
+                })
+            .ToList();
+
+    private static IReadOnlyList<AnalyzerEntry> MergeAnalyzerEntries(IEnumerable<AnalyzerEntry> entries) =>
+        entries
+            .GroupBy(e => e.AssemblyName, StringComparer.Ordinal)
+            .Select(g => new AnalyzerEntry
+            {
+                AssemblyName = g.Key,
+                Time = TimeSpan.FromMilliseconds(g.Sum(e => e.Time.TotalMilliseconds)),
+                // Percent is a share of one compile; across merged TFMs the largest is the
+                // most representative single figure (summing could exceed 100%).
+                Percent = g.Max(e => e.Percent),
+            })
+            .OrderByDescending(e => e.Time)
+            .ToList();
 
     private static ReferenceOverheadStats? ComputeReferenceOverhead(
         List<TargetTiming> allTargets,

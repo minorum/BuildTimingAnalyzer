@@ -60,7 +60,7 @@ public sealed class HtmlReportExporterTests
         var path = Path.Combine(Path.GetTempPath(), $"test-{Guid.NewGuid():N}.html");
         try
         {
-            HtmlReportExporter.Export(report, path, 10);
+            HtmlReportExporter.Export(report, path);
             var html = File.ReadAllText(path);
             await Assert.That(html).Contains("<!DOCTYPE html>");
             await Assert.That(html).Contains("</html>");
@@ -75,7 +75,7 @@ public sealed class HtmlReportExporterTests
         var path = Path.Combine(Path.GetTempPath(), $"test-{Guid.NewGuid():N}.html");
         try
         {
-            HtmlReportExporter.Export(report, path, 10);
+            HtmlReportExporter.Export(report, path);
             var html = File.ReadAllText(path);
             await Assert.That(html).Contains("MyApp");
         }
@@ -89,7 +89,7 @@ public sealed class HtmlReportExporterTests
         var path = Path.Combine(Path.GetTempPath(), $"test-{Guid.NewGuid():N}.html");
         try
         {
-            HtmlReportExporter.Export(report, path, 10);
+            HtmlReportExporter.Export(report, path);
             var html = File.ReadAllText(path);
             // New one-line summary uses "elapsed" and the Top Consumers section uses "Time".
             await Assert.That(html).Contains("elapsed");
@@ -105,7 +105,7 @@ public sealed class HtmlReportExporterTests
         var path = Path.Combine(Path.GetTempPath(), $"test-{Guid.NewGuid():N}.html");
         try
         {
-            HtmlReportExporter.Export(report, path, 10);
+            HtmlReportExporter.Export(report, path);
             var html = File.ReadAllText(path);
             await Assert.That(html).Contains("Build Context");
             await Assert.That(html).Contains("Release");
@@ -121,7 +121,7 @@ public sealed class HtmlReportExporterTests
         var path = Path.Combine(Path.GetTempPath(), $"test-{Guid.NewGuid():N}.html");
         try
         {
-            HtmlReportExporter.Export(report, path, 10);
+            HtmlReportExporter.Export(report, path);
             var html = File.ReadAllText(path);
             // One-line summary; no decorative badge.
             await Assert.That(html).Contains("Build Succeeded");
@@ -137,7 +137,7 @@ public sealed class HtmlReportExporterTests
         var path = Path.Combine(Path.GetTempPath(), $"test-{Guid.NewGuid():N}.html");
         try
         {
-            HtmlReportExporter.Export(report, path, 10);
+            HtmlReportExporter.Export(report, path);
             var html = File.ReadAllText(path);
             await Assert.That(html).Contains("Build Failed");
             await Assert.That(html).Contains("summary-line");
@@ -165,7 +165,7 @@ public sealed class HtmlReportExporterTests
         var path = Path.Combine(Path.GetTempPath(), $"test-{Guid.NewGuid():N}.html");
         try
         {
-            HtmlReportExporter.Export(report, path, 10);
+            HtmlReportExporter.Export(report, path);
             var html = File.ReadAllText(path);
             await Assert.That(html).DoesNotContain("<script>alert");
             await Assert.That(html).Contains("&lt;script&gt;");
@@ -203,12 +203,14 @@ public sealed class HtmlReportExporterTests
         var path = Path.Combine(Path.GetTempPath(), $"test-{Guid.NewGuid():N}.html");
         try
         {
-            HtmlReportExporter.Export(report, path, 10, analysis);
+            HtmlReportExporter.Export(report, path, analysis);
             var html = File.ReadAllText(path);
-            // New bottleneck format: title + measured + inspect line. LikelyExplanation
-            // and Recommendations section were removed per spec.
+            // Bottleneck card: title + measured + caveat (LikelyExplanation) + inspect line.
+            // The standalone Recommendations section was removed per spec, but a finding's
+            // LikelyExplanation is its load-bearing hedge and must survive into the HTML.
             await Assert.That(html).Contains("Test finding title");
             await Assert.That(html).Contains("Test measured facts");
+            await Assert.That(html).Contains("A possible heuristic reason");
             await Assert.That(html).Contains("Look into this");
             await Assert.That(html).Contains("bottleneck");
             await Assert.That(html).Contains("sev-critical");

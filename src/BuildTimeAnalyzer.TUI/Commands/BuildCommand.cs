@@ -112,7 +112,7 @@ public static class BuildCommand
             switch (outputFormat)
             {
                 case "html":
-                    HtmlReportExporter.Export(finalReport, outputPath, settings.TopN, analysis);
+                    HtmlReportExporter.Export(finalReport, outputPath, analysis);
                     break;
                 case "json":
                     JsonReportExporter.Export(finalReport, outputPath, analysis);

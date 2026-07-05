@@ -7,7 +7,7 @@ namespace BuildTimeAnalyzer.Export;
 
 public static class HtmlReportExporter
 {
-    public static void Export(BuildReport report, string outputPath, int topN, BuildAnalysis? analysis = null)
+    public static void Export(BuildReport report, string outputPath, BuildAnalysis? analysis = null)
     {
         var html = BuildHtml(report, analysis);
         File.WriteAllText(outputPath, html, Encoding.UTF8);
@@ -41,6 +41,7 @@ public static class HtmlReportExporter
   .bottleneck.sev-critical { border-left-color: var(--red); }
   .bottleneck .b-title { font-weight: 700; }
   .bottleneck .b-why { margin-top: 4px; font-size: 0.9rem; color: var(--muted); }
+  .bottleneck .b-caveat { margin-top: 4px; font-size: 0.85rem; font-style: italic; color: var(--muted); }
   .bottleneck .b-inspect { margin-top: 4px; font-size: 0.9rem; color: var(--green); }
   .chain-list { list-style: none; padding: 12px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; margin: 8px 0; display: flex; flex-wrap: wrap; gap: 8px 12px; }
   .chain-list li { font-size: 0.88rem; }
@@ -533,21 +534,6 @@ public static class HtmlReportExporter
         return sb.ToString();
     }
 
-    private static string FormatCategoryComposition(ProjectTiming p)
-    {
-        // Normalise against the sum of the breakdown so percentages always add to 100%.
-        var totalMs = p.CategoryBreakdown.Sum(kv => kv.Value.TotalMilliseconds);
-        if (totalMs <= 0) return "";
-
-        var parts = p.CategoryBreakdown
-            .Where(kv => kv.Value.TotalMilliseconds > 0)
-            .OrderByDescending(kv => kv.Value)
-            .Take(5)
-            .Select(kv => $"{CategoryLabel(kv.Key)} {kv.Value.TotalMilliseconds / totalMs * 100:F0}%");
-
-        return string.Join(", ", parts);
-    }
-
     // Cap at 5 per the spec — "Top bottlenecks (3–5 findings maximum)".
     private const int MaxBottlenecks = 5;
     // "Blocking chain — 10 nodes max."
@@ -584,10 +570,17 @@ public static class HtmlReportExporter
             var sevClass = f.Severity == FindingSeverity.Critical ? "sev-critical" : "";
             // Body = finding's Measured, minus any parts that restate the title. Kept short.
             var why = string.IsNullOrEmpty(f.Measured) ? "" : $"<div class=\"b-why\">{Esc(f.Measured)}</div>";
+            // LikelyExplanation is the finding's load-bearing caveat (e.g. the Medium-confidence
+            // "this may be a legitimate Roslyn analyzer project" hedge). Render it so the HTML — the
+            // primary output most users read — doesn't present a hedged finding as a hard verdict.
+            var caveat = string.IsNullOrEmpty(f.LikelyExplanation)
+                ? ""
+                : $"<div class=\"b-caveat muted\">{Esc(f.LikelyExplanation)}</div>";
             sb.AppendLine($"""
 <div class="bottleneck {sevClass}">
   <div class="b-title">{Esc(f.Title)}</div>
   {why}
+  {caveat}
   <div class="b-inspect">→ Inspect: {Esc(f.InvestigationSuggestion)}</div>
 </div>
 """);

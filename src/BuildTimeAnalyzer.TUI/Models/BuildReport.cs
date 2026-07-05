@@ -296,13 +296,6 @@ public sealed record TargetSkipInfo
     public string? EvaluatedCondition { get; init; }
 }
 
-/// <summary>Aggregated skip-reason counts for the summary.</summary>
-public sealed record SkipReasonSummary
-{
-    public required string Reason { get; init; }
-    public required int Count { get; init; }
-}
-
 /// <summary>
 /// Per-project analyzer/generator timing extracted from ReportAnalyzer output in the binlog.
 /// Populated because we always build with -p:ReportAnalyzer=true.
