@@ -55,6 +55,12 @@ public sealed class LogAnalyzer
         // Target skip reasons
         var skipInfos = new List<TargetSkipInfo>();
 
+        // Open (unfinished) targets/tasks keyed by (project instance, id) → index into their list.
+        // Lets the *Finished events close their entry in O(1) instead of an O(n) reverse scan
+        // (which is quadratic over a parallel build's interleaved event stream).
+        var openTargets = new Dictionary<(int ProjectInstanceId, int TargetId), int>(4096);
+        var openTasks = new Dictionary<(int ProjectInstanceId, int TaskId), int>(8192);
+
         int executedTargets = 0;
         int skippedTargets = 0;
         bool restoreObserved = false;
@@ -161,6 +167,7 @@ public sealed class LogAnalyzer
                     var targetId = ctx?.TargetId ?? -1;
                     if (targetId < 0)
                         break;
+                    openTargets[(ctx!.ProjectInstanceId, targetId)] = targetTimings.Count;
                     targetTimings.Add(
                         new RawTargetTiming
                         {
@@ -194,17 +201,10 @@ public sealed class LogAnalyzer
                     var projInstanceId = ctx?.ProjectInstanceId ?? -1;
                     if (targetId < 0)
                         break;
-                    for (int i = targetTimings.Count - 1; i >= 0; i--)
+                    if (openTargets.Remove((projInstanceId, targetId), out var targetIndex)
+                        && targetTimings[targetIndex].EndTime == default)
                     {
-                        if (
-                            targetTimings[i].Id == targetId
-                            && targetTimings[i].ProjectInstanceId == projInstanceId
-                            && targetTimings[i].EndTime == default
-                        )
-                        {
-                            targetTimings[i] = targetTimings[i] with { EndTime = tfe.Timestamp };
-                            break;
-                        }
+                        targetTimings[targetIndex] = targetTimings[targetIndex] with { EndTime = tfe.Timestamp };
                     }
                     break;
                 }
@@ -215,20 +215,27 @@ public sealed class LogAnalyzer
                     if (ctx is not { ProjectInstanceId: >= 0, TargetId: >= 0, TaskId: >= 0 })
                         break;
 
-                    // Track ALL tasks for task-level timing
-                    allRawTasks.Add(new RawTaskTiming
+                    // MSBuild/CallTarget are orchestration wrappers whose duration spans the whole
+                    // child build. They are used only to subtract from exclusive target time and must
+                    // never be counted as leaf task work — otherwise they double-count that time and
+                    // swamp the Top Tasks ranking and every task's SelfPercent.
+                    var isOrchestrationTask = taskSe.TaskName is "MSBuild" or "CallTarget";
+                    if (!isOrchestrationTask)
                     {
-                        TaskId = ctx.TaskId,
-                        ProjectInstanceId = ctx.ProjectInstanceId,
-                        TargetId = ctx.TargetId,
-                        Name = taskSe.TaskName ?? "Unknown",
-                        ProjectName = Path.GetFileNameWithoutExtension(taskSe.ProjectFile ?? ""),
-                        StartTime = taskSe.Timestamp,
-                    });
-
-                    // Orchestration task tracking (for exclusive target time)
-                    if (taskSe.TaskName is "MSBuild" or "CallTarget")
+                        openTasks[(ctx.ProjectInstanceId, ctx.TaskId)] = allRawTasks.Count;
+                        allRawTasks.Add(new RawTaskTiming
+                        {
+                            TaskId = ctx.TaskId,
+                            ProjectInstanceId = ctx.ProjectInstanceId,
+                            TargetId = ctx.TargetId,
+                            Name = taskSe.TaskName ?? "Unknown",
+                            ProjectName = Path.GetFileNameWithoutExtension(taskSe.ProjectFile ?? ""),
+                            StartTime = taskSe.Timestamp,
+                        });
+                    }
+                    else
                     {
+                        // Orchestration task tracking (for exclusive target time)
                         runningOrchTasks[(ctx.ProjectInstanceId, ctx.TaskId)] = (
                             ctx.TargetId,
                             taskSe.Timestamp
@@ -253,17 +260,12 @@ public sealed class LogAnalyzer
                     if (ctx is not { ProjectInstanceId: >= 0, TaskId: >= 0 })
                         break;
 
-                    // Close the task timing
+                    // Close the task timing (orchestration tasks were never added to allRawTasks).
                     var taskKey = (ctx.ProjectInstanceId, ctx.TaskId);
-                    for (int i = allRawTasks.Count - 1; i >= 0; i--)
+                    if (openTasks.Remove(taskKey, out var taskIndex)
+                        && allRawTasks[taskIndex].EndTime == default)
                     {
-                        if (allRawTasks[i].TaskId == ctx.TaskId &&
-                            allRawTasks[i].ProjectInstanceId == ctx.ProjectInstanceId &&
-                            allRawTasks[i].EndTime == default)
-                        {
-                            allRawTasks[i] = allRawTasks[i] with { EndTime = taskFe.Timestamp };
-                            break;
-                        }
+                        allRawTasks[taskIndex] = allRawTasks[taskIndex] with { EndTime = taskFe.Timestamp };
                     }
 
                     // Orchestration task duration (existing logic)

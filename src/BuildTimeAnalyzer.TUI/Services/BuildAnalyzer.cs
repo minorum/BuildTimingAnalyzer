@@ -193,7 +193,7 @@ public static class BuildAnalyzer
             UpperBoundImpactPercent = pct,
             Measured = $"On the blocking chain: {names}. Named classification — verify before excluding.",
             LikelyExplanation = null,
-            InvestigationSuggestion = $"Inspect {top.Name} .sln entry; if only needed for test/benchmark runs, remove its .Build.0 line under Debug|Any CPU.",
+            InvestigationSuggestion = $"Check whether {top.Name} needs to be in the default solution build; if it is only for test/benchmark runs, investigate excluding it from the default configuration (measure the wall-clock delta first — the DAG determines whether the leaf was actually gating anything).",
             Evidence = $"TestBenchmarkOnPath={testBench.Count}, CombinedSelfTime={Fmt(TimeSpan.FromMilliseconds(totalSelf))}",
             ThresholdName = "on blocking chain + self >= 10s",
         });
@@ -210,6 +210,20 @@ public static class BuildAnalyzer
         var top = heavy[0];
         var lines = string.Join(", ", heavy.Take(3).Select(p => $"{p.Name} ({p.WarningCount} warnings)"));
         var topPrefix = report.WarningsByPrefix.OrderByDescending(kv => kv.Value).FirstOrDefault();
+        // Warnings can be counted without a recognizable code (e.g. task-emitted <Warning Text=.../>),
+        // so WarningsByPrefix may be empty even past the threshold. Never emit a bare `/warnaserror:`
+        // (which MSBuild reads as "promote ALL warnings to errors") or render empty "()"/"=" fragments.
+        var hasPrefix = !string.IsNullOrEmpty(topPrefix.Key);
+
+        var prefixMeasured = hasPrefix
+            ? $" Most common warning prefix solution-wide: {topPrefix.Key} ({topPrefix.Value})."
+            : "";
+        var suggestion = hasPrefix
+            ? $"Inspect warnings of type {topPrefix.Key} in {top.Name}. `dotnet build /warnaserror:{topPrefix.Key}` on a branch forces the fix."
+            : $"Inspect the warnings in {top.Name}, group them by code, and promote the dominant code with `dotnet build /warnaserror:<CODE>` on a branch to force the fix.";
+        var evidence = hasPrefix
+            ? $"TopProject={top.Name}({top.WarningCount}), TopPrefix={topPrefix.Key}={topPrefix.Value}"
+            : $"TopProject={top.Name}({top.WarningCount})";
 
         findings.Add(new AnalysisFinding
         {
@@ -217,10 +231,10 @@ public static class BuildAnalyzer
             Title = $"Warnings concentrated on the blocking chain: {lines}",
             Severity = FindingSeverity.Warning,
             Confidence = FindingConfidence.High,
-            Measured = $"Blocking-chain projects with >{WarningsOnCriticalPathMinPerProject} warnings each: {lines}. Most common warning prefix solution-wide: {topPrefix.Key} ({topPrefix.Value}).",
+            Measured = $"Blocking-chain projects with >{WarningsOnCriticalPathMinPerProject} warnings each: {lines}.{prefixMeasured}",
             LikelyExplanation = null,
-            InvestigationSuggestion = $"Inspect warnings of type {topPrefix.Key} in {top.Name}. `dotnet build /warnaserror:{topPrefix.Key}` on a branch forces the fix.",
-            Evidence = $"TopProject={top.Name}({top.WarningCount}), TopPrefix={topPrefix.Key}={topPrefix.Value}",
+            InvestigationSuggestion = suggestion,
+            Evidence = evidence,
             ThresholdName = $"per-project warnings > {WarningsOnCriticalPathMinPerProject}",
         });
     }
@@ -267,7 +281,7 @@ public static class BuildAnalyzer
             UpperBoundImpactPercent = top.Project?.SelfPercent,
             Measured = $"{projectName}: Gen.Logging {Fmt(top.GenTime)} vs project {Fmt(top.Project?.SelfTime ?? TimeSpan.Zero)}. Solution average for Gen.Logging: ~{Fmt(TimeSpan.FromMilliseconds(solutionAvgMs))}.",
             LikelyExplanation = null,
-            InvestigationSuggestion = $"Inspect [LoggerMessage] usage in {projectName}. If absent, find and drop the Microsoft.Extensions.Telemetry reference pulling it in.",
+            InvestigationSuggestion = $"Inspect [LoggerMessage] usage in {projectName}. If absent, trace which reference pulls in Microsoft.Extensions.Telemetry (e.g. `dotnet nuget why {projectName} Microsoft.Extensions.Telemetry`).",
             Evidence = $"GenLoggingTime={Fmt(top.GenTime)}, ProjectSelf={Fmt(top.Project?.SelfTime ?? TimeSpan.Zero)}, Share={top.Share * 100:F0}%",
             ThresholdName = $">{GenLoggingOutlierMinSeconds:F0}s and >{GenLoggingOutlierProjectShareThreshold * 100:F0}% of project",
         });
@@ -364,7 +378,7 @@ public static class BuildAnalyzer
                 Confidence = FindingConfidence.High,
                 Measured = $"{d.ProjectName} ({(project.KindHeuristic == ProjectKind.Test ? "test" : "benchmark")}): heavy package(s) {heavyList}.{introducedBy}",
                 LikelyExplanation = null,
-                InvestigationSuggestion = $"Inspect direct ProjectReferences of {d.ProjectName}. Replace heavy refs with contracts/abstractions, or use <IncludeAssets>compile</IncludeAssets>.",
+                InvestigationSuggestion = $"Inspect the direct ProjectReferences of {d.ProjectName} to see whether the heavy package(s) are actually needed for its test/benchmark runs.",
                 Evidence = $"HeavyPackages={heavyAll.Count}, TransitiveTotal={d.Packages.TransitivePackages.Count}",
                 ThresholdName = "test/benchmark + heavy package present",
             });
@@ -383,16 +397,6 @@ public static class BuildAnalyzer
 
     private static string Fmt(TimeSpan ts) => ConsoleReportRenderer.FormatDuration(ts);
 
-    private static string CategoryLabel(TargetCategory category) => category switch
-    {
-        TargetCategory.Compile => "compile",
-        TargetCategory.SourceGen => "source-gen",
-        TargetCategory.StaticWebAssets => "static-web-assets",
-        TargetCategory.Copy => "output copy",
-        TargetCategory.Restore => "restore",
-        TargetCategory.References => "references",
-        TargetCategory.Uncategorized => "uncategorized",
-        TargetCategory.Other => "internal",
-        _ => "unknown",
-    };
+    private static string CategoryLabel(TargetCategory category) =>
+        ConsoleReportRenderer.CategoryLabel(category);
 }

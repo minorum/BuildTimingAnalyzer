@@ -41,6 +41,32 @@ public static class JsonReportExporter
         Projects = report.Projects.Select(ToProjectDto).ToList(),
         TopTargets = report.TopTargets.Select(ToTargetDto).ToList(),
         PotentiallyCustomTargets = report.PotentiallyCustomTargets.Select(ToTargetDto).ToList(),
+        TopTasks = report.TopTasks.Select(t => new JsonTaskDto
+        {
+            TaskName = t.TaskName,
+            TargetName = t.TargetName,
+            Project = t.ProjectName,
+            SelfTimeMs = (long)t.SelfTime.TotalMilliseconds,
+            SelfTime = ConsoleReportRenderer.FormatDuration(t.SelfTime),
+            SelfPercent = Math.Round(t.SelfPercent, 2),
+        }).ToList(),
+        SkipReasons = report.SkipReasons.Select(s => new JsonSkipDto
+        {
+            TargetName = s.TargetName,
+            Project = s.ProjectName,
+            SkipReason = s.SkipReason,
+            Condition = s.Condition,
+            EvaluatedCondition = s.EvaluatedCondition,
+        }).ToList(),
+        WarningsByCode = report.WarningsByCode.Select(w => new JsonWarningCodeDto
+        {
+            Code = w.Code,
+            Prefix = w.Prefix,
+            Count = w.Count,
+        }).ToList(),
+        GeneratedComInterfaceUsages = report.GeneratedComInterfaceUsages.ToList(),
+        AnalyzerReports = report.AnalyzerReports.Select(ToAnalyzerReportDto).ToList(),
+        ProjectDiagnoses = report.ProjectDiagnoses.Select(ToProjectDiagnosisDto).ToList(),
         CategoryTotals = report.CategoryTotals.ToDictionary(
             kv => kv.Key.ToString(),
             kv => (long)kv.Value.TotalMilliseconds),
@@ -142,10 +168,14 @@ public static class JsonReportExporter
                 {
                     Number = f.Number,
                     Severity = f.Severity.ToString().ToLowerInvariant(),
+                    Confidence = f.Confidence.ToString().ToLowerInvariant(),
                     Title = f.Title,
                     Measured = f.Measured,
                     LikelyExplanation = f.LikelyExplanation,
                     Investigate = f.InvestigationSuggestion,
+                    UpperBoundImpactPercent = f.UpperBoundImpactPercent.HasValue
+                        ? Math.Round(f.UpperBoundImpactPercent.Value, 2)
+                        : null,
                     Evidence = f.Evidence,
                     Threshold = f.ThresholdName,
                 }).ToList(),
@@ -186,6 +216,56 @@ public static class JsonReportExporter
         SelfPercent = Math.Round(t.SelfPercent, 2),
         Category = t.Category.ToString(),
     };
+
+    private static JsonAnalyzerReportDto ToAnalyzerReportDto(AnalyzerReport r) => new()
+    {
+        Project = r.ProjectName,
+        TotalAnalyzerTimeMs = (long)r.TotalAnalyzerTime.TotalMilliseconds,
+        TotalGeneratorTimeMs = (long)r.TotalGeneratorTime.TotalMilliseconds,
+        CscWallTimeMs = (long)r.CscWallTime.TotalMilliseconds,
+        Analyzers = r.Analyzers.Select(ToAnalyzerEntryDto).ToList(),
+        Generators = r.Generators.Select(ToAnalyzerEntryDto).ToList(),
+    };
+
+    private static JsonAnalyzerEntryDto ToAnalyzerEntryDto(AnalyzerEntry e) => new()
+    {
+        AssemblyName = e.AssemblyName,
+        TimeMs = (long)e.Time.TotalMilliseconds,
+        Time = ConsoleReportRenderer.FormatDuration(e.Time),
+        Percent = Math.Round(e.Percent, 2),
+    };
+
+    private static JsonProjectDiagnosisDto ToProjectDiagnosisDto(ProjectDiagnosis d) => new()
+    {
+        ProjectName = d.ProjectName,
+        SelfTimeMs = (long)d.SelfTime.TotalMilliseconds,
+        SelfPercent = Math.Round(d.SelfPercent, 2),
+        TopCategory = d.TopCategory,
+        TopCategoryPercent = Math.Round(d.TopCategoryPercent, 2),
+        TopTask = d.TopTask,
+        TopTaskTimeMs = (long)d.TopTaskTime.TotalMilliseconds,
+        AnalyzerTimeMs = d.AnalyzerTime.HasValue ? (long)d.AnalyzerTime.Value.TotalMilliseconds : null,
+        GeneratorTimeMs = d.GeneratorTime.HasValue ? (long)d.GeneratorTime.Value.TotalMilliseconds : null,
+        OnCriticalPath = d.OnCriticalPath,
+        IsSpanOutlier = d.IsSpanOutlier,
+        Summary = d.Summary,
+        Packages = d.Packages is { } pk ? new JsonProjectPackagesDto
+        {
+            Quality = pk.Quality.ToString(),
+            DirectPackages = pk.DirectPackages.Select(ToPackageRefDto).ToList(),
+            TransitivePackages = pk.TransitivePackages.Select(ToPackageRefDto).ToList(),
+            ProjectReferences = pk.ProjectReferences.ToList(),
+        } : null,
+    };
+
+    private static JsonPackageRefDto ToPackageRefDto(PackageRef p) => new()
+    {
+        Id = p.Id,
+        Version = p.Version,
+        Source = p.Source.ToString(),
+        ParentPackage = p.ParentPackage,
+        IsKnownHeavy = p.IsKnownHeavy,
+    };
 }
 
 [JsonSerializable(typeof(JsonReportDto))]
@@ -212,6 +292,12 @@ internal sealed class JsonReportDto
     public required List<JsonProjectDto> Projects { get; init; }
     public required List<JsonTargetDto> TopTargets { get; init; }
     public required List<JsonTargetDto> PotentiallyCustomTargets { get; init; }
+    public required List<JsonTaskDto> TopTasks { get; init; }
+    public required List<JsonSkipDto> SkipReasons { get; init; }
+    public required List<JsonWarningCodeDto> WarningsByCode { get; init; }
+    public required List<string> GeneratedComInterfaceUsages { get; init; }
+    public required List<JsonAnalyzerReportDto> AnalyzerReports { get; init; }
+    public required List<JsonProjectDiagnosisDto> ProjectDiagnoses { get; init; }
     public required Dictionary<string, long> CategoryTotals { get; init; }
     public JsonReferenceOverheadDto? ReferenceOverhead { get; init; }
     public required List<JsonSpanOutlierDto> SpanOutliers { get; init; }
@@ -375,10 +461,12 @@ internal sealed class JsonFindingDto
 {
     public required int Number { get; init; }
     public required string Severity { get; init; }
+    public required string Confidence { get; init; }
     public required string Title { get; init; }
     public required string Measured { get; init; }
     public string? LikelyExplanation { get; init; }
     public required string Investigate { get; init; }
+    public double? UpperBoundImpactPercent { get; init; }
     public required string Evidence { get; init; }
     public required string Threshold { get; init; }
 }
@@ -387,4 +475,82 @@ internal sealed class JsonRecommendationDto
 {
     public required int Number { get; init; }
     public required string Text { get; init; }
+}
+
+internal sealed class JsonTaskDto
+{
+    public required string TaskName { get; init; }
+    public required string TargetName { get; init; }
+    public required string Project { get; init; }
+    public required long SelfTimeMs { get; init; }
+    public required string SelfTime { get; init; }
+    public required double SelfPercent { get; init; }
+}
+
+internal sealed class JsonSkipDto
+{
+    public required string TargetName { get; init; }
+    public required string Project { get; init; }
+    public required string SkipReason { get; init; }
+    public string? Condition { get; init; }
+    public string? EvaluatedCondition { get; init; }
+}
+
+internal sealed class JsonWarningCodeDto
+{
+    public required string Code { get; init; }
+    public required string Prefix { get; init; }
+    public required int Count { get; init; }
+}
+
+internal sealed class JsonAnalyzerEntryDto
+{
+    public required string AssemblyName { get; init; }
+    public required long TimeMs { get; init; }
+    public required string Time { get; init; }
+    public required double Percent { get; init; }
+}
+
+internal sealed class JsonAnalyzerReportDto
+{
+    public required string Project { get; init; }
+    public required long TotalAnalyzerTimeMs { get; init; }
+    public required long TotalGeneratorTimeMs { get; init; }
+    public required long CscWallTimeMs { get; init; }
+    public required List<JsonAnalyzerEntryDto> Analyzers { get; init; }
+    public required List<JsonAnalyzerEntryDto> Generators { get; init; }
+}
+
+internal sealed class JsonPackageRefDto
+{
+    public required string Id { get; init; }
+    public string? Version { get; init; }
+    public required string Source { get; init; }
+    public string? ParentPackage { get; init; }
+    public required bool IsKnownHeavy { get; init; }
+}
+
+internal sealed class JsonProjectPackagesDto
+{
+    public required string Quality { get; init; }
+    public required List<JsonPackageRefDto> DirectPackages { get; init; }
+    public required List<JsonPackageRefDto> TransitivePackages { get; init; }
+    public required List<string> ProjectReferences { get; init; }
+}
+
+internal sealed class JsonProjectDiagnosisDto
+{
+    public required string ProjectName { get; init; }
+    public required long SelfTimeMs { get; init; }
+    public required double SelfPercent { get; init; }
+    public required string TopCategory { get; init; }
+    public required double TopCategoryPercent { get; init; }
+    public required string TopTask { get; init; }
+    public required long TopTaskTimeMs { get; init; }
+    public long? AnalyzerTimeMs { get; init; }
+    public long? GeneratorTimeMs { get; init; }
+    public required bool OnCriticalPath { get; init; }
+    public required bool IsSpanOutlier { get; init; }
+    public required string Summary { get; init; }
+    public JsonProjectPackagesDto? Packages { get; init; }
 }

@@ -40,6 +40,11 @@ public sealed class BuildRunner
             RedirectStandardError = true,
             UseShellExecute = false,
         };
+        // Force the compiler/CLI UI language to English. ReportAnalyzer output is parsed by
+        // AnalyzerReportParser, which keys off English section labels and invariant-format numbers;
+        // without this, a localized host emits translated labels / comma decimals and all
+        // analyzer/generator data silently fails to parse.
+        psi.Environment["DOTNET_CLI_UI_LANGUAGE"] = "en";
 
         using var process = new Process { StartInfo = psi };
 

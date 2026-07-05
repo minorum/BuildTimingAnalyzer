@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using BuildTimeAnalyzer.Models;
 
 namespace BuildTimeAnalyzer.Services;
@@ -6,12 +7,24 @@ namespace BuildTimeAnalyzer.Services;
 /// Scans source files for attribute usage that confirms whether a source generator is doing
 /// actual work. Used to answer the question "this generator cost 10 seconds — was it a no-op?".
 /// </summary>
-public static class SourceAttributeScanner
+public static partial class SourceAttributeScanner
 {
     private const int MaxBytesPerFile = 512 * 1024; // skip absurdly large generated files
 
     /// <summary>
-    /// Returns project short names where at least one .cs file contains <c>[GeneratedComInterface]</c>.
+    /// Matches <c>GeneratedComInterface</c> in attribute position, tolerating an optional namespace
+    /// qualification, the optional <c>Attribute</c> suffix, and arguments — e.g.
+    /// <c>[GeneratedComInterface]</c>, <c>[GeneratedComInterface(Options=…)]</c>,
+    /// <c>[GeneratedComInterfaceAttribute]</c>,
+    /// <c>[global::System.Runtime.InteropServices.Marshalling.GeneratedComInterface]</c>, and
+    /// <c>[Guid("…"), GeneratedComInterface]</c>. The leading identifier boundary rejects
+    /// <c>MyGeneratedComInterface</c>; the trailing <c>] ( ,</c> requires attribute position.
+    /// </summary>
+    [GeneratedRegex(@"(?<![A-Za-z0-9_])GeneratedComInterface(Attribute)?\s*[\](,]", RegexOptions.CultureInvariant)]
+    private static partial Regex GeneratedComInterfaceUsage();
+
+    /// <summary>
+    /// Returns project short names where at least one .cs file applies <c>[GeneratedComInterface]</c>.
     /// Silently skips projects whose directory is missing, unreadable, or contains no .cs files.
     /// </summary>
     public static IReadOnlyList<string> FindGeneratedComInterfaceUsages(IEnumerable<ProjectTiming> projects)
@@ -23,7 +36,7 @@ public static class SourceAttributeScanner
             var dir = SafeGetDirectory(p.FullPath);
             if (dir is null || !Directory.Exists(dir)) continue;
 
-            if (ContainsAttribute(dir, "[GeneratedComInterface]"))
+            if (ContainsGeneratedComInterface(dir))
                 result.Add(p.Name);
         }
         return result;
@@ -35,7 +48,7 @@ public static class SourceAttributeScanner
         catch { return null; }
     }
 
-    private static bool ContainsAttribute(string projectDir, string attribute)
+    private static bool ContainsGeneratedComInterface(string projectDir)
     {
         try
         {
@@ -45,10 +58,13 @@ public static class SourceAttributeScanner
                 {
                     var info = new FileInfo(file);
                     if (info.Length > MaxBytesPerFile) continue;
-                    // Read as UTF-8 (default). Attribute text is ASCII so encoding edge cases don't matter.
-                    var text = File.ReadAllText(file);
-                    if (text.Contains(attribute, StringComparison.Ordinal))
-                        return true;
+                    // Stream lines and early-exit on first match — avoids allocating the whole file
+                    // as one string. Attribute text is ASCII so default UTF-8 decoding is fine.
+                    foreach (var line in File.ReadLines(file))
+                    {
+                        if (GeneratedComInterfaceUsage().IsMatch(line))
+                            return true;
+                    }
                 }
                 catch { /* per-file errors skipped silently */ }
             }

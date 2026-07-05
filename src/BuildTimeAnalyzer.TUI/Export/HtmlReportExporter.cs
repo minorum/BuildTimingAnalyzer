@@ -549,20 +549,6 @@ public static class HtmlReportExporter
         return string.Join(", ", parts);
     }
 
-    private static string FormatTopWarningCategoriesHtml(BuildReport report)
-    {
-        if (report.WarningsByCode.Count == 0) return "";
-        var byPrefix = report.WarningsByCode
-            .GroupBy(t => t.Prefix)
-            .Select(g => new { Prefix = g.Key, Count = g.Sum(t => t.Count) })
-            .OrderByDescending(x => x.Count)
-            .Take(3)
-            .ToList();
-        if (byPrefix.Count == 0) return "";
-        var text = string.Join(" · ", byPrefix.Select(x => $"{Esc(x.Prefix)} {x.Count}"));
-        return $"<div class=\"sub\">{text}</div>";
-    }
-
     // Cap at 5 per the spec — "Top bottlenecks (3–5 findings maximum)".
     private const int MaxBottlenecks = 5;
     // "Blocking chain — 10 nodes max."
@@ -838,18 +824,9 @@ public static class HtmlReportExporter
         return rows;
     }
 
-    private static string CategoryLabel(TargetCategory category) => category switch
-    {
-        TargetCategory.Compile => "compile",
-        TargetCategory.SourceGen => "source-gen",
-        TargetCategory.StaticWebAssets => "static-web",
-        TargetCategory.Copy => "output copy",
-        TargetCategory.Restore => "restore",
-        TargetCategory.References => "references",
-        TargetCategory.Uncategorized => "uncategorized",
-        TargetCategory.Other => "internal",
-        _ => "unknown",
-    };
+    // Single source of truth so the HTML labels match the console/JSON/analysis output.
+    private static string CategoryLabel(TargetCategory category) =>
+        ConsoleReportRenderer.CategoryLabel(category);
 
     private static string PrefixLabel(string prefix) => prefix switch
     {

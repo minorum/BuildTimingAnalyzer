@@ -109,52 +109,61 @@ public static class ProjectPackageResolver
             if (!doc.RootElement.TryGetProperty("targets", out var targets) || targets.ValueKind != JsonValueKind.Object)
                 return null;
 
-            // Use the first TFM target. Most projects have just one; multi-targeting ones
-            // pick the first deterministically rather than enumerating all (keeps the list tractable).
-            var firstTarget = default(JsonElement);
-            var hasFirst = false;
+            // Union packages across ALL TFM targets. A multi-targeted project conditions some
+            // packages to specific frameworks, so taking only the first target would silently drop
+            // them (and mis-attribute IsKnownHeavy/ParentPackage). Dedup by package id — first
+            // occurrence wins — which keeps the list tractable while being complete.
+            var frameworkTargets = new List<JsonElement>();
             foreach (var t in targets.EnumerateObject())
-            {
-                if (t.Value.ValueKind == JsonValueKind.Object) { firstTarget = t.Value; hasFirst = true; break; }
-            }
-            if (!hasFirst) return null;
+                if (t.Value.ValueKind == JsonValueKind.Object)
+                    frameworkTargets.Add(t.Value);
+            if (frameworkTargets.Count == 0) return null;
 
             var directIds = new HashSet<string>(directRefs.Select(p => p.Id), StringComparer.OrdinalIgnoreCase);
-            // Build a parent lookup: package -> direct ancestor (one-level walk).
+
+            // Parent lookup: package -> a direct ancestor (one-level walk), across all TFMs.
             var dependencyParents = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var entry in firstTarget.EnumerateObject())
+            foreach (var target in frameworkTargets)
             {
-                var slash = entry.Name.IndexOf('/');
-                if (slash <= 0) continue;
-                var id = entry.Name[..slash];
-                if (!directIds.Contains(id)) continue;
-                if (!entry.Value.TryGetProperty("dependencies", out var deps) || deps.ValueKind != JsonValueKind.Object) continue;
-                foreach (var d in deps.EnumerateObject())
-                    dependencyParents.TryAdd(d.Name, id);
+                foreach (var entry in target.EnumerateObject())
+                {
+                    var slash = entry.Name.IndexOf('/');
+                    if (slash <= 0) continue;
+                    var id = entry.Name[..slash];
+                    if (!directIds.Contains(id)) continue;
+                    if (!entry.Value.TryGetProperty("dependencies", out var deps) || deps.ValueKind != JsonValueKind.Object) continue;
+                    foreach (var d in deps.EnumerateObject())
+                        dependencyParents.TryAdd(d.Name, id);
+                }
             }
 
             var transitive = new List<PackageRef>();
-            foreach (var entry in firstTarget.EnumerateObject())
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var target in frameworkTargets)
             {
-                var slash = entry.Name.IndexOf('/');
-                if (slash <= 0) continue;
-                var id = entry.Name[..slash];
-                var version = entry.Name[(slash + 1)..];
-                if (directIds.Contains(id)) continue;
-                // Skip project-type entries (e.g. "type":"project") — those are ProjectReferences.
-                if (entry.Value.TryGetProperty("type", out var typeEl) &&
-                    typeEl.ValueKind == JsonValueKind.String &&
-                    string.Equals(typeEl.GetString(), "project", StringComparison.Ordinal))
-                    continue;
-
-                transitive.Add(new PackageRef
+                foreach (var entry in target.EnumerateObject())
                 {
-                    Id = id,
-                    Version = version,
-                    Source = PackageReferenceSource.Transitive,
-                    ParentPackage = dependencyParents.GetValueOrDefault(id),
-                    IsKnownHeavy = HeavyPackages.Contains(id),
-                });
+                    var slash = entry.Name.IndexOf('/');
+                    if (slash <= 0) continue;
+                    var id = entry.Name[..slash];
+                    var version = entry.Name[(slash + 1)..];
+                    if (directIds.Contains(id)) continue;
+                    // Skip project-type entries (e.g. "type":"project") — those are ProjectReferences.
+                    if (entry.Value.TryGetProperty("type", out var typeEl) &&
+                        typeEl.ValueKind == JsonValueKind.String &&
+                        string.Equals(typeEl.GetString(), "project", StringComparison.Ordinal))
+                        continue;
+                    if (!seen.Add(id)) continue; // already collected from an earlier TFM target
+
+                    transitive.Add(new PackageRef
+                    {
+                        Id = id,
+                        Version = version,
+                        Source = PackageReferenceSource.Transitive,
+                        ParentPackage = dependencyParents.GetValueOrDefault(id),
+                        IsKnownHeavy = HeavyPackages.Contains(id),
+                    });
+                }
             }
             return transitive;
         }
