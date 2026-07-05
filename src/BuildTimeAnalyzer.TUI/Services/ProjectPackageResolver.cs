@@ -68,7 +68,10 @@ public static class ProjectPackageResolver
             {
                 var inc = e.Attribute("Include")?.Value;
                 if (string.IsNullOrEmpty(inc)) continue;
-                projectRefs.Add(Path.GetFileNameWithoutExtension(inc));
+                // .csproj Include paths conventionally use '\' separators. Normalise to '/' so
+                // GetFileNameWithoutExtension strips the directory on non-Windows too (on Linux/macOS
+                // '\' is a valid filename char, not a separator).
+                projectRefs.Add(Path.GetFileNameWithoutExtension(inc.Replace('\\', '/')));
             }
         }
         catch
