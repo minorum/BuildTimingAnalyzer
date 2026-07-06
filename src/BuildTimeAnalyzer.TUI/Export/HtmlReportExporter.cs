@@ -566,7 +566,10 @@ public static class HtmlReportExporter
         sb.AppendLine("  <div class=\"ft-toolbar\">");
         sb.AppendLine($"    <span class=\"ft-metric\"><b>{total}</b> total</span>");
         if (showWork) sb.AppendLine($"    <span class=\"ft-metric\"><b>{work}</b> work</span>");
-        sb.AppendLine($"    <span class=\"ft-metric\"><b>{report.Projects.Count}</b> projects</span>");
+        // Count distinct project names, matching the flamegraph frames (which dedup same-named
+        // projects) and its name-based filter — so the metric can't disagree with the visualization.
+        var projectCount = report.Projects.Select(p => p.Name).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+        sb.AppendLine($"    <span class=\"ft-metric\"><b>{projectCount}</b> projects</span>");
         // Only surface parallelism once the build actually overlapped work (≥ 1×). Below 1× the
         // build was mostly idle/serial, where "0.6× parallel" (or a rounded "0.0×") would mislead.
         if (par >= 1.0) sb.AppendLine($"    <span class=\"ft-metric\"><b>{Esc(parStr)}</b> parallel</span>");
@@ -593,21 +596,22 @@ public static class HtmlReportExporter
     private static FlameNode BuildFlameTree(BuildReport report)
     {
         var cats = new List<FlameNode>();
-        foreach (var cat in report.CategoryTotals.Keys)
+        foreach (var (category, catTotal) in report.CategoryTotals.Select(kv => (kv.Key, kv.Value)))
         {
-            var (label, key) = FriendlyCategory(cat);
+            var catMs = catTotal.TotalMilliseconds;
+            if (catMs <= 0) continue;
+            var (label, key) = FriendlyCategory(category);
 
             // Per-project contributions to this category. CategoryBreakdown is keyed by project
             // short name, and report.Projects can hold two projects that share a short name (same
             // file name in different folders) which then carry the same merged breakdown — dedup by
             // name so their combined time is counted once, not doubled.
             var contribs = report.Projects
-                .Select(p => (p.Name, Ms: p.CategoryBreakdown.GetValueOrDefault(cat).TotalMilliseconds))
+                .Select(p => (p.Name, Ms: p.CategoryBreakdown.GetValueOrDefault(category).TotalMilliseconds))
                 .Where(x => x.Ms > 0)
                 .DistinctBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
                 .OrderByDescending(x => x.Ms)
                 .ToList();
-            if (contribs.Count == 0) continue;
 
             var kids = new List<FlameNode>();
             foreach (var c in contribs.Take(MaxFlameProjectsPerCategory))
@@ -619,9 +623,18 @@ public static class HtmlReportExporter
                 kids.Add(new FlameNode(tailLabel, key, tail.Sum(x => x.Ms), Array.Empty<FlameNode>()));
             }
 
-            // Category width = Σ the project frames actually shown, so every parent equals the sum
-            // of its children and percentages reconcile with widths at every level.
-            cats.Add(new FlameNode(label, key, kids.Sum(k => k.Ms), kids));
+            // Time in this category not attributed to any listed project (e.g. solution- or
+            // SDK-level targets) — surface it as a remainder child so the children still sum to the
+            // full CategoryTotals value and no category time is dropped or under-reported. Only when
+            // there are project children to reconcile against and the slice is meaningful.
+            var remainder = catMs - kids.Sum(k => k.Ms);
+            if (kids.Count > 0 && remainder > Math.Max(1.0, catMs * 0.005))
+                kids.Add(new FlameNode("shared build steps", key, remainder, Array.Empty<FlameNode>()));
+
+            // Category width = the full CategoryTotals time; its children sum to it (via the
+            // remainder), so every parent equals the sum of its children and percentages reconcile
+            // with widths at every level.
+            cats.Add(new FlameNode(label, key, catMs, kids));
         }
         cats.Sort((a, b) => b.Ms.CompareTo(a.Ms));
         return new FlameNode("All build work", "root", cats.Sum(c => c.Ms), cats);
