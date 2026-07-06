@@ -550,26 +550,32 @@ public static class HtmlReportExporter
         if (grandMs <= 0) return;
 
         var total = Esc(ConsoleReportRenderer.FormatDuration(report.TotalDuration));
-        var work = Esc(ConsoleReportRenderer.FormatDuration(report.TotalSelfTime));
-        var showWork = report.TotalSelfTime > TimeSpan.Zero;
+        // "work" mirrors the flamegraph's own root total (grandMs), so the chip, the root frame, and
+        // every "% of all work" share one denominator instead of disagreeing.
+        var work = Esc(ConsoleReportRenderer.FormatDuration(TimeSpan.FromMilliseconds(grandMs)));
         var par = report.AchievedParallelism;
         var parStr = par.ToString("0.0", CultureInfo.InvariantCulture) + "×";
 
         sb.AppendLine(FlameCss);
 
         sb.AppendLine("<h2>Where the Time Went</h2>");
-        sb.AppendLine("<p class=\"note\">Wider = more time. Tap a block to see what it is; blocks with a › zoom in. Shows where the <strong>work</strong> went — the build finishes faster than the total work because much of it runs in parallel.</p>");
+        // The parallelism clause only holds when work overlapped (par ≥ 1×); on a serial/idle build
+        // the parallel chip is hidden, so don't assert parallelism the numbers don't support.
+        var note = "Wider = more time. Tap a block to see what it is; blocks with a › zoom in. Shows where the <strong>work</strong> went.";
+        if (par >= 1.0) note += " The build finishes faster than the total work because much of it runs in parallel.";
+        sb.AppendLine($"<p class=\"note\">{note}</p>");
 
         var minWidth = MaxRowChildren(tree) * 66;
 
         sb.AppendLine("<div class=\"flame-tool\">");
         sb.AppendLine("  <div class=\"ft-toolbar\">");
         sb.AppendLine($"    <span class=\"ft-metric\"><b>{total}</b> total</span>");
-        if (showWork) sb.AppendLine($"    <span class=\"ft-metric\"><b>{work}</b> work</span>");
-        // Count distinct project names, matching the flamegraph frames (which dedup same-named
-        // projects) and its name-based filter — so the metric can't disagree with the visualization.
+        sb.AppendLine($"    <span class=\"ft-metric\"><b>{work}</b> work</span>");
+        // Distinct project names — same-named projects share one frame, so counting names keeps the
+        // chip in step with the frames and the name-based filter (it may still differ from the page
+        // header's raw project count when two projects share a file name).
         var projectCount = report.Projects.Select(p => p.Name).Distinct(StringComparer.OrdinalIgnoreCase).Count();
-        sb.AppendLine($"    <span class=\"ft-metric\"><b>{projectCount}</b> projects</span>");
+        sb.AppendLine($"    <span class=\"ft-metric\"><b>{projectCount}</b> project{(projectCount == 1 ? "" : "s")}</span>");
         // Only surface parallelism once the build actually overlapped work (≥ 1×). Below 1× the
         // build was mostly idle/serial, where "0.6× parallel" (or a rounded "0.0×") would mislead.
         if (par >= 1.0) sb.AppendLine($"    <span class=\"ft-metric\"><b>{Esc(parStr)}</b> parallel</span>");
@@ -596,7 +602,7 @@ public static class HtmlReportExporter
     private static FlameNode BuildFlameTree(BuildReport report)
     {
         var cats = new List<FlameNode>();
-        foreach (var (category, catTotal) in report.CategoryTotals.Select(kv => (kv.Key, kv.Value)))
+        foreach (var (category, catTotal) in report.CategoryTotals)
         {
             var catMs = catTotal.TotalMilliseconds;
             if (catMs <= 0) continue;
@@ -615,12 +621,13 @@ public static class HtmlReportExporter
 
             var kids = new List<FlameNode>();
             foreach (var c in contribs.Take(MaxFlameProjectsPerCategory))
-                kids.Add(new FlameNode(c.Name, key, c.Ms, Array.Empty<FlameNode>()));
+                kids.Add(new FlameNode(c.Name, key, c.Ms, Array.Empty<FlameNode>(), IsProject: true));
             var tail = contribs.Skip(MaxFlameProjectsPerCategory).ToList();
             if (tail.Count > 0)
             {
                 var tailLabel = tail.Count == 1 ? "1 more project" : $"{tail.Count} more projects";
-                kids.Add(new FlameNode(tailLabel, key, tail.Sum(x => x.Ms), Array.Empty<FlameNode>()));
+                kids.Add(new FlameNode(tailLabel, key, tail.Sum(x => x.Ms), Array.Empty<FlameNode>(),
+                    Desc: "The combined time of the smaller projects in this category."));
             }
 
             // Time in this category not attributed to any listed project (e.g. solution- or
@@ -629,13 +636,29 @@ public static class HtmlReportExporter
             // there are project children to reconcile against and the slice is meaningful.
             var remainder = catMs - kids.Sum(k => k.Ms);
             if (kids.Count > 0 && remainder > Math.Max(1.0, catMs * 0.005))
-                kids.Add(new FlameNode("shared build steps", key, remainder, Array.Empty<FlameNode>()));
+                kids.Add(new FlameNode("shared build steps", key, remainder, Array.Empty<FlameNode>(),
+                    Desc: "Time in this category not tied to a specific project — e.g. solution- or SDK-level build steps."));
 
             // Category width = the full CategoryTotals time; its children sum to it (via the
             // remainder), so every parent equals the sum of its children and percentages reconcile
             // with widths at every level.
             cats.Add(new FlameNode(label, key, catMs, kids));
         }
+
+        // The canonical total is the report-wide self time (target-level), which is what the toolbar
+        // shows as "work" and what parallelism is measured against. It is ≥ Σ category totals because
+        // CategoryTotals drops sub-1ms targets; surface that gap as a top-level "other build steps"
+        // node so the root equals the canonical total and every "% of all work" is a true share of it.
+        var catSum = cats.Sum(c => c.Ms);
+        var totalWork = Math.Max(report.TotalSelfTime.TotalMilliseconds, catSum);
+        var gap = totalWork - catSum;
+        // Use a plain > 1ms threshold (not the per-category 0.5% one) so the root equals the
+        // canonical total work whenever the gap is non-trivial — this keeps the "work" chip, the
+        // parallelism denominator, and the root frame all on one number.
+        if (cats.Count > 0 && gap > 1.0)
+            cats.Add(new FlameNode("other build steps", "other", gap, Array.Empty<FlameNode>(),
+                Desc: "Many small build steps not grouped into a category."));
+
         cats.Sort((a, b) => b.Ms.CompareTo(a.Ms));
         return new FlameNode("All build work", "root", cats.Sum(c => c.Ms), cats);
     }
@@ -657,8 +680,10 @@ public static class HtmlReportExporter
           .Append(" data-type=\"").Append(node.Key).Append('"')
           .Append(" data-time=\"").Append(Esc(time)).Append('"')
           .Append(" data-pct=\"").Append(pctStr).Append('"')
-          .Append(" data-haskids=\"").Append(hasKids ? "1" : "0").Append('"')
-          .Append(" title=\"").Append(Esc($"{node.Name}: {time} · {pctStr}% of all work")).Append("\">")
+          .Append(" data-haskids=\"").Append(hasKids ? "1" : "0").Append('"');
+        if (node.IsProject) sb.Append(" data-role=\"project\"");
+        if (node.Desc is not null) sb.Append(" data-desc=\"").Append(Esc(node.Desc)).Append('"');
+        sb.Append(" title=\"").Append(Esc($"{node.Name}: {time} · {pctStr}% of all work")).Append("\">")
           .Append("<span class=\"ft-lab\">").Append(Esc(node.Name)).Append("</span>");
         if (pct >= 9) sb.Append("<span class=\"ft-pct\">").Append(pct.ToString("0", CultureInfo.InvariantCulture)).Append("%</span>");
         if (hasKids && !isRoot) sb.Append("<span class=\"ft-kids\">›</span>");
@@ -682,7 +707,12 @@ public static class HtmlReportExporter
         return max;
     }
 
-    private sealed record FlameNode(string Name, string Key, double Ms, IReadOnlyList<FlameNode> Children);
+    // Desc overrides the category-derived info-card description (used for the synthetic remainder /
+    // rollup frames). IsProject marks real per-project leaf frames so the "filter projects" box can
+    // target only them.
+    private sealed record FlameNode(
+        string Name, string Key, double Ms, IReadOnlyList<FlameNode> Children,
+        string? Desc = null, bool IsProject = false);
 
     // Beginner-friendly labels for the flamegraph (deliberately different from ConsoleReportRenderer.
     // CategoryLabel). The returned Key must have a matching `.ftc-<key>` colour rule in FlameCss and a
@@ -814,7 +844,7 @@ function ftSelect(frameEl) {
   ftCard.querySelector('.ftc-sw').className = 'ftc-sw ftc-' + type;
   ftCard.querySelector('.ftc-t').textContent = frameEl.dataset.name;
   ftCard.querySelector('.ftc-v').textContent = frameEl.dataset.time + ' · ' + frameEl.dataset.pct + '% of all work';
-  ftCard.querySelector('.ftc-d').textContent = FT_DESC[type] || '';
+  ftCard.querySelector('.ftc-d').textContent = frameEl.dataset.desc || FT_DESC[type] || '';
   var nodeEl = frameEl.parentElement;
   var zoom = ftCard.querySelector('.ftc-zoom');
   var canZoom = frameEl.dataset.haskids === '1' && nodeEl !== ftRootNode() && !nodeEl.classList.contains('ft-focus');
@@ -826,7 +856,9 @@ function ftClose() { ftCard.classList.remove('ft-show'); ftSel = null; ftFlame.q
 
 function ftFilter(q) {
   q = (q || '').trim().toLowerCase();
-  ftFlame.querySelectorAll('.ft-frame').forEach(function (f) {
+  // Only project frames are filterable — the input is labelled "filter projects", so leave category
+  // headers and the synthetic remainder/rollup frames untouched.
+  ftFlame.querySelectorAll('.ft-frame[data-role="project"]').forEach(function (f) {
     f.classList.remove('ft-match', 'ft-dim');
     if (!q) return;
     if ((f.dataset.name || '').toLowerCase().indexOf(q) >= 0) f.classList.add('ft-match'); else f.classList.add('ft-dim');

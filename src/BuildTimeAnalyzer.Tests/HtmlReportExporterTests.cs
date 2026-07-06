@@ -290,6 +290,40 @@ public sealed class HtmlReportExporterTests
     }
 
     [Test]
+    public async Task Export_FlamegraphReconcilesRemaindersAndTags()
+    {
+        // 60s project under an 80s Compile category (=> 20s "shared build steps" remainder), and
+        // 100s total work vs 80s categorized (=> 20s top-level "other build steps"). 100s/200s wall
+        // clock => 0.5x parallel, below the 1x threshold.
+        var report = CreateSampleReport(overrideProject: FlameProject("MyApp", 60)) with
+        {
+            EndTime = new DateTime(2025, 6, 15, 10, 3, 20), // start + 200s
+            TotalSelfTime = TimeSpan.FromSeconds(100),
+            CategoryTotals = new Dictionary<TargetCategory, TimeSpan>
+            {
+                [TargetCategory.Compile] = TimeSpan.FromSeconds(80),
+            },
+        };
+        var path = Path.Combine(Path.GetTempPath(), $"test-{Guid.NewGuid():N}.html");
+        try
+        {
+            HtmlReportExporter.Export(report, path);
+            var html = File.ReadAllText(path);
+            // Category-level and top-level remainders both surface (nothing dropped).
+            await Assert.That(html).Contains("shared build steps");
+            await Assert.That(html).Contains("other build steps");
+            // Synthetic frames carry their own description; real project frames are tagged.
+            await Assert.That(html).Contains("data-desc=");
+            await Assert.That(html).Contains("data-role=\"project\"");
+            // The "work" chip mirrors the flamegraph root total (100s => "1m 40s"), one denominator.
+            await Assert.That(html).Contains("1m 40s");
+            // 0.5x parallel: both the parallel chip and the note's parallelism clause are suppressed.
+            await Assert.That(html).DoesNotContain("parallel");
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Test]
     public async Task Export_FlamegraphDedupesSameNamedProjects()
     {
         // Two projects sharing a short name (different folders) carry the same merged breakdown in
