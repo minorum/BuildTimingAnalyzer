@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using BuildTimeAnalyzer.Models;
 using BuildTimeAnalyzer.Rendering;
@@ -179,8 +180,9 @@ public static class HtmlReportExporter
 </p>
 """);
 
-        // ── Strict layout: bottlenecks → blocking chain → top consumers → inspect next ──
+        // ── Strict layout: bottlenecks → flamegraph → blocking chain → top consumers → inspect next → per-project ──
         AppendTopBottlenecks(sb, analysis);
+        AppendFlamegraph(sb, report);
         AppendBlockingChain(sb, report);
         AppendTopConsumers(sb, report);
         AppendInspectNext(sb, analysis);
@@ -533,6 +535,348 @@ public static class HtmlReportExporter
 
         return sb.ToString();
     }
+
+    // ─────────────────────────── Flamegraph ───────────────────────────
+
+    private static void AppendFlamegraph(StringBuilder sb, BuildReport report)
+    {
+        // The tree is computed bottom-up (every parent = Σ its rendered children), so its root
+        // total is the exact sum of what the flamegraph draws — this keeps each frame's "% of all
+        // work" label consistent with its width at every level.
+        var tree = BuildFlameTree(report);
+        var grandMs = tree.Ms;
+        // No attributable per-project work (e.g. a fully-incremental build with nothing to do) — a
+        // root frame at 0% of 0 work is noise, so skip the section entirely.
+        if (grandMs <= 0) return;
+
+        var total = Esc(ConsoleReportRenderer.FormatDuration(report.TotalDuration));
+        // "work" mirrors the flamegraph's own root total (grandMs), so the chip, the root frame, and
+        // every "% of all work" share one denominator instead of disagreeing.
+        var work = Esc(ConsoleReportRenderer.FormatDuration(TimeSpan.FromMilliseconds(grandMs)));
+        var par = report.AchievedParallelism;
+        var parStr = par.ToString("0.0", CultureInfo.InvariantCulture) + "×";
+
+        sb.AppendLine(FlameCss);
+
+        sb.AppendLine("<h2>Where the Time Went</h2>");
+        // The parallelism clause only holds when work overlapped (par ≥ 1×); on a serial/idle build
+        // the parallel chip is hidden, so don't assert parallelism the numbers don't support.
+        var note = "Wider = more time. Tap a block to see what it is; blocks with a › zoom in. Shows where the <strong>work</strong> went.";
+        if (par >= 1.0) note += " The build finishes faster than the total work because much of it runs in parallel.";
+        sb.AppendLine($"<p class=\"note\">{note}</p>");
+
+        var minWidth = MaxRowChildren(tree) * 66;
+
+        sb.AppendLine("<div class=\"flame-tool\">");
+        sb.AppendLine("  <div class=\"ft-toolbar\">");
+        sb.AppendLine($"    <span class=\"ft-metric\"><b>{total}</b> total</span>");
+        sb.AppendLine($"    <span class=\"ft-metric\"><b>{work}</b> work</span>");
+        // Distinct project names — same-named projects share one frame, so counting names keeps the
+        // chip in step with the frames and the name-based filter (it may still differ from the page
+        // header's raw project count when two projects share a file name).
+        var projectCount = report.Projects.Select(p => p.Name).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+        sb.AppendLine($"    <span class=\"ft-metric\"><b>{projectCount}</b> project{(projectCount == 1 ? "" : "s")}</span>");
+        // Only surface parallelism once the build actually overlapped work (≥ 1×). Below 1× the
+        // build was mostly idle/serial, where "0.6× parallel" (or a rounded "0.0×") would mislead.
+        if (par >= 1.0) sb.AppendLine($"    <span class=\"ft-metric\"><b>{Esc(parStr)}</b> parallel</span>");
+        sb.AppendLine("    <span class=\"ft-search\">\U0001F50D <input id=\"ftq\" placeholder=\"filter projects…\" aria-label=\"filter projects\"></span>");
+        sb.AppendLine("  </div>");
+        sb.AppendLine("  <div class=\"ft-crumbs\" id=\"ftcrumbs\"></div>");
+
+        // The flamegraph is fully static HTML — every value is HTML-escaped like the rest of the
+        // report. The script below only reads the rendered DOM (data-* attributes); there is no
+        // embedded data blob, so nothing needs script-context escaping.
+        sb.Append("  <div class=\"ft-wrap\"><div id=\"ftflame\" style=\"min-width:").Append(minWidth).Append("px\">");
+        RenderFlameNode(sb, tree, grandMs, true);
+        sb.AppendLine("</div></div>");
+        sb.AppendLine("</div>");
+        sb.AppendLine("<div id=\"ftcard\" role=\"dialog\"><div class=\"ftc-h\"><span class=\"ftc-sw\"></span><span class=\"ftc-t\"></span></div><div class=\"ftc-v\"></div><div class=\"ftc-d\"></div><div class=\"ftc-acts\"><button class=\"ftc-zoom\" hidden>Zoom in ›</button><button class=\"ftc-close\">Close</button></div></div>");
+        sb.AppendLine("<script>");
+        sb.AppendLine(FlameScript);
+        sb.AppendLine("</script>");
+    }
+
+    // Max per-category project frames before the rest roll up into a "N more projects" frame.
+    private const int MaxFlameProjectsPerCategory = 12;
+
+    private static FlameNode BuildFlameTree(BuildReport report)
+    {
+        var cats = new List<FlameNode>();
+        foreach (var (category, catTotal) in report.CategoryTotals)
+        {
+            var catMs = catTotal.TotalMilliseconds;
+            if (catMs <= 0) continue;
+            var (label, key) = FriendlyCategory(category);
+
+            // Per-project contributions to this category. CategoryBreakdown is keyed by project
+            // short name, and report.Projects can hold two projects that share a short name (same
+            // file name in different folders) which then carry the same merged breakdown — dedup by
+            // name so their combined time is counted once, not doubled.
+            var contribs = report.Projects
+                .Select(p => (p.Name, Ms: p.CategoryBreakdown.GetValueOrDefault(category).TotalMilliseconds))
+                .Where(x => x.Ms > 0)
+                .DistinctBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
+                .OrderByDescending(x => x.Ms)
+                .ToList();
+
+            var kids = new List<FlameNode>();
+            foreach (var c in contribs.Take(MaxFlameProjectsPerCategory))
+                kids.Add(new FlameNode(c.Name, key, c.Ms, Array.Empty<FlameNode>(), IsProject: true));
+            var tail = contribs.Skip(MaxFlameProjectsPerCategory).ToList();
+            if (tail.Count > 0)
+            {
+                var tailLabel = tail.Count == 1 ? "1 more project" : $"{tail.Count} more projects";
+                kids.Add(new FlameNode(tailLabel, key, tail.Sum(x => x.Ms), Array.Empty<FlameNode>(),
+                    Desc: "The combined time of the smaller projects in this category."));
+            }
+
+            // Time in this category not attributed to any listed project (e.g. solution- or
+            // SDK-level targets) — surface it as a remainder child so the children still sum to the
+            // full CategoryTotals value and no category time is dropped or under-reported. Only when
+            // there are project children to reconcile against and the slice is meaningful.
+            var remainder = catMs - kids.Sum(k => k.Ms);
+            if (kids.Count > 0 && remainder > Math.Max(1.0, catMs * 0.005))
+                kids.Add(new FlameNode("shared build steps", key, remainder, Array.Empty<FlameNode>(),
+                    Desc: "Time in this category not tied to a specific project — e.g. solution- or SDK-level build steps."));
+
+            // Category width = the full CategoryTotals time; its children sum to it (via the
+            // remainder), so every parent equals the sum of its children and percentages reconcile
+            // with widths at every level.
+            cats.Add(new FlameNode(label, key, catMs, kids));
+        }
+
+        // The canonical total is the report-wide self time (target-level), which is what the toolbar
+        // shows as "work" and what parallelism is measured against. It is ≥ Σ category totals because
+        // CategoryTotals drops sub-1ms targets; surface that gap as a top-level "other build steps"
+        // node so the root equals the canonical total and every "% of all work" is a true share of it.
+        var catSum = cats.Sum(c => c.Ms);
+        var totalWork = Math.Max(report.TotalSelfTime.TotalMilliseconds, catSum);
+        var gap = totalWork - catSum;
+        // Use a plain > 1ms threshold (not the per-category 0.5% one) so the root equals the
+        // canonical total work whenever the gap is non-trivial — this keeps the "work" chip, the
+        // parallelism denominator, and the root frame all on one number.
+        if (cats.Count > 0 && gap > 1.0)
+            cats.Add(new FlameNode("other build steps", "other", gap, Array.Empty<FlameNode>(),
+                Desc: "Many small build steps not grouped into a category."));
+
+        cats.Sort((a, b) => b.Ms.CompareTo(a.Ms));
+        return new FlameNode("All build work", "root", cats.Sum(c => c.Ms), cats);
+    }
+
+    // grandMs is the root total and is always > 0 here (AppendFlamegraph returns early otherwise).
+    private static void RenderFlameNode(StringBuilder sb, FlameNode node, double grandMs, bool isRoot)
+    {
+        var pct = node.Ms / grandMs * 100;
+        var pctStr = pct.ToString("0.0", CultureInfo.InvariantCulture);
+        var time = ConsoleReportRenderer.FormatDuration(TimeSpan.FromMilliseconds(node.Ms));
+        var hasKids = node.Children.Count > 0;
+
+        sb.Append("<div class=\"ft-node\"");
+        if (!isRoot) sb.Append(" style=\"flex:").Append(Num(node.Ms)).Append(" 1 0\"");
+        sb.Append('>');
+
+        sb.Append("<div class=\"ft-frame ftc-").Append(node.Key).Append('"')
+          .Append(" data-name=\"").Append(Esc(node.Name)).Append('"')
+          .Append(" data-type=\"").Append(node.Key).Append('"')
+          .Append(" data-time=\"").Append(Esc(time)).Append('"')
+          .Append(" data-pct=\"").Append(pctStr).Append('"')
+          .Append(" data-haskids=\"").Append(hasKids ? "1" : "0").Append('"');
+        if (node.IsProject) sb.Append(" data-role=\"project\"");
+        if (node.Desc is not null) sb.Append(" data-desc=\"").Append(Esc(node.Desc)).Append('"');
+        sb.Append(" title=\"").Append(Esc($"{node.Name}: {time} · {pctStr}% of all work")).Append("\">")
+          .Append("<span class=\"ft-lab\">").Append(Esc(node.Name)).Append("</span>");
+        if (pct >= 9) sb.Append("<span class=\"ft-pct\">").Append(pct.ToString("0", CultureInfo.InvariantCulture)).Append("%</span>");
+        if (hasKids && !isRoot) sb.Append("<span class=\"ft-kids\">›</span>");
+        sb.Append("</div>");
+
+        if (hasKids)
+        {
+            sb.Append("<div class=\"ft-row\">");
+            foreach (var child in node.Children)
+                RenderFlameNode(sb, child, grandMs, false);
+            sb.Append("</div>");
+        }
+        sb.Append("</div>");
+    }
+
+    private static int MaxRowChildren(FlameNode node)
+    {
+        var max = node.Children.Count;
+        foreach (var c in node.Children)
+            max = Math.Max(max, MaxRowChildren(c));
+        return max;
+    }
+
+    // Desc overrides the category-derived info-card description (used for the synthetic remainder /
+    // rollup frames). IsProject marks real per-project leaf frames so the "filter projects" box can
+    // target only them.
+    private sealed record FlameNode(
+        string Name, string Key, double Ms, IReadOnlyList<FlameNode> Children,
+        string? Desc = null, bool IsProject = false);
+
+    // Beginner-friendly labels for the flamegraph (deliberately different from ConsoleReportRenderer.
+    // CategoryLabel). The returned Key must have a matching `.ftc-<key>` colour rule in FlameCss and a
+    // matching entry in the FlameScript FT_DESC map — a new key without both falls back to "other".
+    private static (string Label, string Key) FriendlyCategory(TargetCategory c) => c switch
+    {
+        TargetCategory.Compile => ("Compiling code", "compile"),
+        TargetCategory.Restore => ("Fetching packages", "pkg"),
+        TargetCategory.Copy => ("Copying output", "copy"),
+        TargetCategory.StaticWebAssets => ("Web assets", "web"),
+        TargetCategory.SourceGen => ("Source generators", "sourcegen"),
+        TargetCategory.References => ("Resolving references", "refs"),
+        TargetCategory.Other => ("Build setup", "misc"),
+        TargetCategory.Uncategorized => ("Other work", "other"),
+        _ => ("Other", "other"),
+    };
+
+    // CSS flex-grow value. Emit the raw millisecond magnitude (not truncated to an integer) so
+    // sub-millisecond frames keep a proportional, non-zero width instead of collapsing to flex:0.
+    private static string Num(double ms) => ms.ToString("0.###", CultureInfo.InvariantCulture);
+
+    private const string FlameCss = """
+<style>
+  .flame-tool { font-family: Consolas, ui-monospace, monospace; margin: 4px 0 8px; }
+  .ft-toolbar { display:flex; align-items:center; gap:10px 16px; flex-wrap:wrap; background:#161b22; border:1px solid #30363d; border-radius:8px; padding:10px 14px; }
+  .ft-metric { font-size:0.8rem; color:#8b949e; } .ft-metric b { color:#e6edf3; font-size:0.95rem; }
+  .ft-search { flex:1 1 150px; display:flex; align-items:center; gap:6px; border:1px solid #30363d; border-radius:6px; padding:5px 9px; background:#0d1117; }
+  .ft-search input { border:none; background:none; outline:none; color:#e6edf3; font:inherit; font-size:0.8rem; width:100%; min-width:0; }
+  .ft-crumbs { display:flex; align-items:center; gap:6px; flex-wrap:wrap; padding:10px 2px 4px; font-size:0.8rem; }
+  .ft-crumbs .ft-cr { color:#58a6ff; cursor:pointer; border:none; background:none; padding:4px 2px; font:inherit; }
+  .ft-crumbs .ft-cr:hover { text-decoration:underline; }
+  .ft-crumbs .ft-sep { color:#8b949e; } .ft-crumbs .ft-cur { color:#8b949e; }
+  .ft-crumbs .ft-reset { margin-left:auto; color:#8b949e; cursor:pointer; border:1px solid #30363d; background:#0d1117; border-radius:6px; padding:5px 9px; font:inherit; }
+  .ft-wrap { overflow-x:auto; padding-bottom:6px; }
+  #ftflame { min-width:100%; }
+  .ft-node { display:flex; flex-direction:column; min-width:0; }
+  .ft-row { display:flex; gap:3px; min-width:0; }
+  .ft-frame { height:34px; border-radius:4px; display:flex; align-items:center; padding:0 8px; font-size:0.78rem; color:#14100a; white-space:nowrap; overflow:hidden; border:1px solid rgba(0,0,0,.22); cursor:pointer; margin-bottom:3px; outline:2px solid transparent; }
+  .ft-frame:hover { filter:brightness(1.08); }
+  .ft-frame .ft-lab { font-weight:700; overflow:hidden; text-overflow:ellipsis; }
+  .ft-frame .ft-pct { opacity:.72; margin-left:7px; font-weight:500; }
+  .ft-frame .ft-kids { opacity:.6; margin-left:6px; font-weight:700; }
+  .ft-frame.ft-dim { opacity:.26; } .ft-frame.ft-match, .ft-frame.ft-sel { outline-color:#58a6ff; }
+  .ftc-root { background:#57606a; color:#fff; }
+  .ftc-compile { background:#ec6a43; } .ftc-pkg { background:#f2953c; } .ftc-copy { background:#e0b93a; }
+  .ftc-web { background:#d98a58; } .ftc-sourcegen { background:#e0714f; } .ftc-refs { background:#c58a4a; }
+  .ftc-misc { background:#8b98a8; } .ftc-other { background:#b0a99c; }
+  .ft-hidden { display:none !important; }
+  .ft-node.ft-focus { flex:1 1 100% !important; }
+  #ftcard { position:fixed; z-index:40; left:16px; right:16px; bottom:16px; background:#161b22; border:1px solid #30363d; border-radius:12px; padding:14px 15px; box-shadow:0 8px 30px rgba(0,0,0,.5); transform:translateY(160%); transition:transform .18s ease; }
+  #ftcard.ft-show { transform:translateY(0); }
+  #ftcard .ftc-h { display:flex; align-items:center; gap:8px; font-weight:700; font-size:0.95rem; color:#e6edf3; }
+  #ftcard .ftc-sw { width:12px; height:12px; border-radius:3px; flex:none; }
+  #ftcard .ftc-v { color:#58a6ff; font-size:0.82rem; margin:5px 0 7px; }
+  #ftcard .ftc-d { color:#8b949e; font-size:0.85rem; line-height:1.5; }
+  #ftcard .ftc-acts { display:flex; gap:8px; margin-top:12px; }
+  #ftcard button { font:inherit; font-size:0.85rem; border-radius:8px; padding:9px 14px; cursor:pointer; border:1px solid #30363d; }
+  #ftcard .ftc-zoom { background:#238636; color:#fff; border-color:#238636; font-weight:700; }
+  #ftcard .ftc-close { background:#21262d; color:#8b949e; margin-left:auto; }
+  @media (min-width:721px) { #ftcard { left:auto; width:340px; } }
+  @media (prefers-reduced-motion: reduce) { #ftcard { transition:none; } }
+</style>
+""";
+
+    // Progressive enhancement only. The flamegraph is already fully rendered as static HTML; this
+    // script reads the DOM (data-* attributes) to add zoom, filtering and the info card. It never
+    // parses embedded data, so there is no script-context escaping to get wrong.
+    private const string FlameScript = """
+const FT_DESC = {
+  root: "Everything the build did, added up. Tap the coloured blocks to break it down.",
+  compile: "Turning your source into a DLL. Usually the biggest cost.",
+  pkg: "Working out which NuGet packages each project needs.",
+  copy: "Copying built files into each project's output folder.",
+  web: "Bundling and processing CSS/JS web assets.",
+  sourcegen: "Running source generators and analyzers.",
+  refs: "Resolving assembly and framework references.",
+  misc: "General build setup and SDK plumbing.",
+  other: "Work that did not match a known category."
+};
+const ftFlame = document.getElementById('ftflame');
+const ftCrumbs = document.getElementById('ftcrumbs');
+const ftCard = document.getElementById('ftcard');
+const ftQ = document.getElementById('ftq');
+let ftSel = null;
+
+function ftRootNode() { return ftFlame.querySelector(':scope > .ft-node'); }
+
+function ftClearZoom() {
+  ftFlame.querySelectorAll('.ft-hidden').forEach(function (e) { e.classList.remove('ft-hidden'); });
+  ftFlame.querySelectorAll('.ft-focus').forEach(function (e) { e.classList.remove('ft-focus'); });
+}
+
+function ftZoomTo(nodeEl) {
+  ftClearZoom();
+  var ancestors = [];
+  var cur = nodeEl;
+  while (cur.parentElement && cur.parentElement !== ftFlame) {
+    var row = cur.parentElement;
+    var parentNode = row.parentElement;
+    Array.prototype.forEach.call(row.children, function (sib) { if (sib !== cur) sib.classList.add('ft-hidden'); });
+    var pf = parentNode.querySelector(':scope > .ft-frame');
+    if (pf) { pf.classList.add('ft-hidden'); ancestors.unshift(pf); }
+    cur = parentNode;
+  }
+  if (nodeEl !== ftRootNode()) nodeEl.classList.add('ft-focus');
+  ftDrawCrumbs(ancestors, nodeEl.querySelector(':scope > .ft-frame'));
+  ftFilter(ftQ.value);
+}
+
+function ftResetZoom() { ftClearZoom(); ftCrumbs.innerHTML = ''; ftFilter(ftQ.value); }
+
+function ftDrawCrumbs(ancestorFrames, focusFrame) {
+  ftCrumbs.innerHTML = '';
+  if (!ancestorFrames.length) return;
+  var frames = ancestorFrames.concat([focusFrame]);
+  frames.forEach(function (fr, i) {
+    if (i) { var s = document.createElement('span'); s.className = 'ft-sep'; s.textContent = '▸'; ftCrumbs.appendChild(s); }
+    if (i === frames.length - 1) { var c = document.createElement('span'); c.className = 'ft-cur'; c.textContent = fr.dataset.name; ftCrumbs.appendChild(c); }
+    else { var b = document.createElement('button'); b.className = 'ft-cr'; b.textContent = fr.dataset.name; b.onclick = function (e) { e.stopPropagation(); ftZoomTo(fr.parentElement); }; ftCrumbs.appendChild(b); }
+  });
+  var r = document.createElement('button'); r.className = 'ft-reset'; r.textContent = '↺ reset'; r.onclick = function (e) { e.stopPropagation(); ftResetZoom(); }; ftCrumbs.appendChild(r);
+}
+
+function ftSelect(frameEl) {
+  ftSel = frameEl;
+  ftFlame.querySelectorAll('.ft-frame.ft-sel').forEach(function (x) { x.classList.remove('ft-sel'); });
+  frameEl.classList.add('ft-sel');
+  var type = frameEl.dataset.type || 'other';
+  ftCard.querySelector('.ftc-sw').className = 'ftc-sw ftc-' + type;
+  ftCard.querySelector('.ftc-t').textContent = frameEl.dataset.name;
+  ftCard.querySelector('.ftc-v').textContent = frameEl.dataset.time + ' · ' + frameEl.dataset.pct + '% of all work';
+  ftCard.querySelector('.ftc-d').textContent = frameEl.dataset.desc || FT_DESC[type] || '';
+  var nodeEl = frameEl.parentElement;
+  var zoom = ftCard.querySelector('.ftc-zoom');
+  var canZoom = frameEl.dataset.haskids === '1' && nodeEl !== ftRootNode() && !nodeEl.classList.contains('ft-focus');
+  zoom.hidden = !canZoom;
+  zoom.onclick = function () { ftZoomTo(nodeEl); ftClose(); };
+  ftCard.classList.add('ft-show');
+}
+function ftClose() { ftCard.classList.remove('ft-show'); ftSel = null; ftFlame.querySelectorAll('.ft-frame.ft-sel').forEach(function (x) { x.classList.remove('ft-sel'); }); }
+
+function ftFilter(q) {
+  q = (q || '').trim().toLowerCase();
+  // Only project frames are filterable — the input is labelled "filter projects", so leave category
+  // headers and the synthetic remainder/rollup frames untouched.
+  ftFlame.querySelectorAll('.ft-frame[data-role="project"]').forEach(function (f) {
+    f.classList.remove('ft-match', 'ft-dim');
+    if (!q) return;
+    if ((f.dataset.name || '').toLowerCase().indexOf(q) >= 0) f.classList.add('ft-match'); else f.classList.add('ft-dim');
+  });
+}
+
+ftFlame.addEventListener('click', function (e) {
+  var f = e.target.closest('.ft-frame');
+  if (!f) return;
+  e.stopPropagation();
+  ftSelect(f);
+});
+ftCard.querySelector('.ftc-close').onclick = ftClose;
+ftCard.addEventListener('click', function (e) { e.stopPropagation(); });
+document.addEventListener('click', function () { if (ftSel) ftClose(); });
+ftQ.addEventListener('input', function (e) { ftFilter(e.target.value); });
+ftQ.addEventListener('click', function (e) { e.stopPropagation(); });
+""";
 
     // Cap at 5 per the spec — "Top bottlenecks (3–5 findings maximum)".
     private const int MaxBottlenecks = 5;

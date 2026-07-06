@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.14
+
+Add a "Where the Time Went" flamegraph to the HTML report — an interactive, beginner-friendly
+view of where build time is spent, grouped by category (compiling, fetching packages, copying
+output, …) and broken down per project. It renders as fully static HTML (no embedded JSON); the
+accompanying script only reads the rendered DOM to add zoom, filtering, and an info card, so it
+degrades gracefully and carries no script-injection surface. The report and JSON export now also
+surface total self time and achieved parallelism (aggregate work ÷ wall-clock).
+
 ## 0.0.13
 
 Switch to HTML-first output. The terminal renderer is gone. btanalyzer now prints short

@@ -217,4 +217,134 @@ public sealed class HtmlReportExporterTests
         }
         finally { File.Delete(path); }
     }
+
+    // A project whose whole self time is a single category, for exercising the flamegraph.
+    private static ProjectTiming FlameProject(string name, double seconds, TargetCategory category = TargetCategory.Compile) =>
+        new()
+        {
+            Name = name,
+            FullPath = $"C:\\src\\{name}\\proj.csproj",
+            SelfTime = TimeSpan.FromSeconds(seconds),
+            Succeeded = true,
+            ErrorCount = 0,
+            WarningCount = 0,
+            SelfPercent = 100,
+            StartOffset = TimeSpan.Zero,
+            EndOffset = TimeSpan.FromSeconds(seconds),
+            CategoryBreakdown = new Dictionary<TargetCategory, TimeSpan> { [category] = TimeSpan.FromSeconds(seconds) },
+        };
+
+    [Test]
+    public async Task Export_ContainsFlamegraph()
+    {
+        // 30s work / 20s wall clock => 1.5× parallel (above the 1× threshold, so the metric shows).
+        var report = CreateSampleReport(overrideProject: FlameProject("MyApp", 30)) with
+        {
+            TotalSelfTime = TimeSpan.FromSeconds(30),
+            CategoryTotals = new Dictionary<TargetCategory, TimeSpan>
+            {
+                [TargetCategory.Compile] = TimeSpan.FromSeconds(30),
+            },
+        };
+        var path = Path.Combine(Path.GetTempPath(), $"test-{Guid.NewGuid():N}.html");
+        try
+        {
+            HtmlReportExporter.Export(report, path);
+            var html = File.ReadAllText(path);
+            await Assert.That(html).Contains("Where the Time Went");
+            await Assert.That(html).Contains("id=\"ftflame\"");
+            // Frames are rendered as static HTML — no embedded JSON data blob.
+            await Assert.That(html).Contains("ft-frame");
+            await Assert.That(html).DoesNotContain("application/json");
+            // Category frame comes from the category set; the per-project child frame comes from the
+            // project's CategoryBreakdown — assert both are actually wired and rendered.
+            await Assert.That(html).Contains("Compiling code");
+            await Assert.That(html).Contains("data-name=\"MyApp\"");
+            // 30s work / 20s wall clock => 1.5× parallel (exact formatted value).
+            await Assert.That(html).Contains("1.5×");
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Test]
+    public async Task Export_FlamegraphEscapesProjectNames()
+    {
+        var report = CreateSampleReport(overrideProject: FlameProject("</script><img src=x>", 5)) with
+        {
+            TotalSelfTime = TimeSpan.FromSeconds(5),
+            CategoryTotals = new Dictionary<TargetCategory, TimeSpan>
+            {
+                [TargetCategory.Compile] = TimeSpan.FromSeconds(5),
+            },
+        };
+        var path = Path.Combine(Path.GetTempPath(), $"test-{Guid.NewGuid():N}.html");
+        try
+        {
+            HtmlReportExporter.Export(report, path);
+            var html = File.ReadAllText(path);
+            // The project name is a flamegraph frame label; it must be HTML-escaped there too.
+            await Assert.That(html).DoesNotContain("<img src=x>");
+            await Assert.That(html).Contains("&lt;/script&gt;&lt;img src=x&gt;");
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Test]
+    public async Task Export_FlamegraphReconcilesRemaindersAndTags()
+    {
+        // 60s project under an 80s Compile category (=> 20s "shared build steps" remainder), and
+        // 100s total work vs 80s categorized (=> 20s top-level "other build steps"). 100s/200s wall
+        // clock => 0.5x parallel, below the 1x threshold.
+        var report = CreateSampleReport(overrideProject: FlameProject("MyApp", 60)) with
+        {
+            EndTime = new DateTime(2025, 6, 15, 10, 3, 20), // start + 200s
+            TotalSelfTime = TimeSpan.FromSeconds(100),
+            CategoryTotals = new Dictionary<TargetCategory, TimeSpan>
+            {
+                [TargetCategory.Compile] = TimeSpan.FromSeconds(80),
+            },
+        };
+        var path = Path.Combine(Path.GetTempPath(), $"test-{Guid.NewGuid():N}.html");
+        try
+        {
+            HtmlReportExporter.Export(report, path);
+            var html = File.ReadAllText(path);
+            // Category-level and top-level remainders both surface (nothing dropped).
+            await Assert.That(html).Contains("shared build steps");
+            await Assert.That(html).Contains("other build steps");
+            // Synthetic frames carry their own description; real project frames are tagged.
+            await Assert.That(html).Contains("data-desc=");
+            await Assert.That(html).Contains("data-role=\"project\"");
+            // The "work" chip mirrors the flamegraph root total (100s => "1m 40s"), one denominator.
+            await Assert.That(html).Contains("1m 40s");
+            // 0.5x parallel: both the parallel chip and the note's parallelism clause are suppressed.
+            await Assert.That(html).DoesNotContain("parallel");
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Test]
+    public async Task Export_FlamegraphDedupesSameNamedProjects()
+    {
+        // Two projects sharing a short name (different folders) carry the same merged breakdown in
+        // production; the flamegraph must count that once, not render a doubled child frame.
+        var a = FlameProject("Dup", 10) with { FullPath = "C:\\src\\one\\Dup.csproj" };
+        var b = FlameProject("Dup", 10) with { FullPath = "C:\\src\\two\\Dup.csproj" };
+        var report = CreateSampleReport() with
+        {
+            Projects = [a, b],
+            TotalSelfTime = TimeSpan.FromSeconds(10),
+            CategoryTotals = new Dictionary<TargetCategory, TimeSpan> { [TargetCategory.Compile] = TimeSpan.FromSeconds(10) },
+        };
+        var path = Path.Combine(Path.GetTempPath(), $"test-{Guid.NewGuid():N}.html");
+        try
+        {
+            HtmlReportExporter.Export(report, path);
+            var html = File.ReadAllText(path);
+            // data-name is flamegraph-only; the deduped project must appear as exactly one frame.
+            var frameCount = html.Split("data-name=\"Dup\"").Length - 1;
+            await Assert.That(frameCount).IsEqualTo(1);
+        }
+        finally { File.Delete(path); }
+    }
 }
