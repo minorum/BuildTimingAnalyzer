@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.0.15
+
+Hardening and CI-oriented features.
+
+### Hardening
+- Every external interaction is now wrapped in an error boundary. A missing/corrupt/empty binary
+  log, a missing `dotnet` on `PATH`, or an unwritable `--output` path now produces a clear message
+  and a clean exit code instead of a stack-trace crash.
+- **Ctrl-C** is handled: the build process tree is killed (no orphaned MSBuild nodes) and the temp
+  binary log is cleaned up.
+- Build arguments are passed via `ProcessStartInfo.ArgumentList`, so project/solution paths and
+  extra args containing spaces no longer break the build.
+- The top-tasks table now honours `--top` (previously hard-coded to 30).
+
+### New: analyze an existing binlog
+- `btanalyzer analyze <file.binlog>` runs the full report pipeline on a pre-existing binary log
+  without building — useful for analyzing CI artifacts. It never deletes the input file.
+
+### New: CI + regression workflow
+- `--compare <baseline.json>` diffs the run against a previously exported JSON report and shows
+  wall-clock/self-time deltas plus per-project regressions.
+- `--fail-on <spec>` exits non-zero for CI gating: `critical`, `warning`, `errors`,
+  `wallclock:<seconds>`, `regression:<percent>` (comma-separated).
+- Markdown output (`-o report.md`) for pasting into PRs or use as a CI step summary.
+- `--history <file.jsonl>` appends a one-line run summary for trend tracking.
+
+### New: configuration
+- An optional `btanalyzer.json` (discovered near the project, or via `--config`) can extend the
+  "known heavy package" set and tune finding thresholds without recompiling.
+
 ## 0.0.14
 
 Add a "Where the Time Went" flamegraph to the HTML report — an interactive, beginner-friendly

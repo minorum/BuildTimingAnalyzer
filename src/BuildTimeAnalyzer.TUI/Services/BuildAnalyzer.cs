@@ -14,23 +14,14 @@ namespace BuildTimeAnalyzer.Services;
 public static class BuildAnalyzer
 {
     // ── Named thresholds ─────────────────────────────────────────────
-
-    private const double LargestShareCriticalPct = 25.0;
-    private const double LargestShareWarningPct = 15.0;
-
-    private const double CostlyResolvePackageAssetsSeconds = 3.0;
-
-    // TFM negotiation overhead — cost aggregates across many ProjectReference edges
-    private const double TfmNegotiationAggregateSecondsThreshold = 120;
+    // The five "policy" thresholds below live on AnalyzerThresholds so btanalyzer.json can tune
+    // them per project. The generator-specific constants that follow stay internal.
 
     // Generator anomalies
     private const double GenLoggingOutlierMinSeconds = 5;
     private const double GenLoggingOutlierProjectShareThreshold = 0.5;
     private const double ComInterfaceGeneratorMinSecondsForFinding = 10;
     private const double CSharpAnalyzersInNonRoslynMinSeconds = 5;
-
-    // Warning concentration on the critical path
-    private const int WarningsOnCriticalPathMinPerProject = 50;
 
     private static readonly HashSet<string> KnownGenLoggingAssemblies = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -42,8 +33,10 @@ public static class BuildAnalyzer
     };
     private const string CSharpAnalyzersAssembly = "Microsoft.CodeAnalysis.CSharp.Analyzers";
 
-    public static BuildAnalysis Analyze(BuildReport report)
+    public static BuildAnalysis Analyze(BuildReport report, AnalyzerThresholds? thresholds = null)
     {
+        var t = thresholds ?? AnalyzerThresholds.Default;
+
         if (report.TotalDuration < TimeSpan.FromSeconds(1))
             return new BuildAnalysis { Findings = [], Recommendations = [] };
 
@@ -53,11 +46,11 @@ public static class BuildAnalyzer
         // Removed: LargestGap, SpanWaitingPattern, CriticalPathConcentration, WarningConcentration,
         // BroadReferenceOverhead, OutlierTargets, ComInterfaceGenerator no-op — either too generic,
         // duplicates the blocking chain, or "no action needed" (trivia, not findings).
-        DetectLargestShare(report, findings);
-        DetectCostlyResolvePackageAssets(report, findings);
-        DetectTfmNegotiationOverhead(report, findings);
+        DetectLargestShare(report, findings, t);
+        DetectCostlyResolvePackageAssets(report, findings, t);
+        DetectTfmNegotiationOverhead(report, findings, t);
         DetectBenchmarksOnCriticalPath(report, findings);
-        DetectWarningHeavyCriticalPath(report, findings);
+        DetectWarningHeavyCriticalPath(report, findings, t);
         DetectGenLoggingOutlier(report, findings);
         DetectComInterfaceGeneratorWithUsages(report, findings);
         DetectCSharpAnalyzersInNonRoslynProject(report, findings);
@@ -88,12 +81,12 @@ public static class BuildAnalyzer
 
     // ──────────────────────────── Findings ────────────────────────────
 
-    private static void DetectLargestShare(BuildReport report, List<AnalysisFinding> findings)
+    private static void DetectLargestShare(BuildReport report, List<AnalysisFinding> findings, AnalyzerThresholds t)
     {
         if (report.Projects.Count < 2) return;
 
         var top = report.Projects[0];
-        if (top.SelfPercent <= LargestShareWarningPct) return;
+        if (top.SelfPercent <= t.LargestShareWarningPercent) return;
 
         var inspectTarget = top.Targets.Count > 0
             ? $"{top.Name} — start with target {top.Targets[0].Name} ({Fmt(top.Targets[0].SelfTime)}, {CategoryLabel(top.Targets[0].Category)})"
@@ -103,21 +96,21 @@ public static class BuildAnalyzer
         {
             Number = 0,
             Title = $"{top.Name} dominates build time",
-            Severity = top.SelfPercent > LargestShareCriticalPct ? FindingSeverity.Critical : FindingSeverity.Warning,
+            Severity = top.SelfPercent > t.LargestShareCriticalPercent ? FindingSeverity.Critical : FindingSeverity.Warning,
             Confidence = FindingConfidence.High,
             Measured = $"{top.Name}: {Fmt(top.SelfTime)} ({top.SelfPercent:F1}% of total).",
             LikelyExplanation = null,
             InvestigationSuggestion = $"Inspect {inspectTarget}.",
             Evidence = $"SelfPercent={top.SelfPercent:F1}%, SelfTime={Fmt(top.SelfTime)}",
-            ThresholdName = $"top-project-share > {LargestShareWarningPct:F0}%",
+            ThresholdName = $"top-project-share > {t.LargestShareWarningPercent:F0}%",
             UpperBoundImpactPercent = top.SelfPercent,
         });
     }
 
-    private static void DetectCostlyResolvePackageAssets(BuildReport report, List<AnalysisFinding> findings)
+    private static void DetectCostlyResolvePackageAssets(BuildReport report, List<AnalysisFinding> findings, AnalyzerThresholds thr)
     {
         var costly = report.TopTargets
-            .Where(t => t.Name == "ResolvePackageAssets" && t.SelfTime.TotalSeconds > CostlyResolvePackageAssetsSeconds)
+            .Where(t => t.Name == "ResolvePackageAssets" && t.SelfTime.TotalSeconds > thr.CostlyResolvePackageAssetsSeconds)
             .OrderByDescending(t => t.SelfTime)
             .ToList();
 
@@ -131,20 +124,20 @@ public static class BuildAnalyzer
             Severity = FindingSeverity.Warning,
             Confidence = FindingConfidence.High,
             UpperBoundImpactPercent = costly.Sum(c => c.SelfPercent),
-            Measured = $"Slowest: {max.ProjectName} at {Fmt(max.SelfTime)}. {costly.Count} project(s) cross the {CostlyResolvePackageAssetsSeconds:F0}s threshold.",
+            Measured = $"Slowest: {max.ProjectName} at {Fmt(max.SelfTime)}. {costly.Count} project(s) cross the {thr.CostlyResolvePackageAssetsSeconds:F0}s threshold.",
             LikelyExplanation = null,
             InvestigationSuggestion = $"Run `dotnet nuget why {max.ProjectName} <heavy-package>` on its largest direct packages to locate transitive chains.",
             Evidence = $"Max.SelfTime={Fmt(max.SelfTime)}, Count={costly.Count}",
-            ThresholdName = $"> {CostlyResolvePackageAssetsSeconds:F0}s",
+            ThresholdName = $"> {thr.CostlyResolvePackageAssetsSeconds:F0}s",
         });
     }
 
-    private static void DetectTfmNegotiationOverhead(BuildReport report, List<AnalysisFinding> findings)
+    private static void DetectTfmNegotiationOverhead(BuildReport report, List<AnalysisFinding> findings, AnalyzerThresholds thr)
     {
         // Sourced from the orchestration-task total for _GetProjectReferenceTargetFrameworkProperties
         // (LogAnalyzer.TfmNegotiationTotal) — that work is an MSBuild task and never appears in TopTasks.
         var totalMs = report.TfmNegotiationTotal.TotalMilliseconds;
-        if (totalMs < TfmNegotiationAggregateSecondsThreshold * 1000) return;
+        if (totalMs < thr.TfmNegotiationAggregateSeconds * 1000) return;
 
         var edges = report.Graph.Health.TotalEdges;
 
@@ -158,7 +151,7 @@ public static class BuildAnalyzer
             LikelyExplanation = null,
             InvestigationSuggestion = "Add `SkipGetTargetFrameworkProperties=\"true\"` to same-TFM ProjectReferences via Directory.Build.targets, or try `dotnet build -graph`.",
             Evidence = $"TfmNegotiationTotal={Fmt(TimeSpan.FromMilliseconds(totalMs))}, Edges={edges}",
-            ThresholdName = $"total > {TfmNegotiationAggregateSecondsThreshold:F0}s",
+            ThresholdName = $"total > {thr.TfmNegotiationAggregateSeconds:F0}s",
         });
     }
 
@@ -195,10 +188,10 @@ public static class BuildAnalyzer
         });
     }
 
-    private static void DetectWarningHeavyCriticalPath(BuildReport report, List<AnalysisFinding> findings)
+    private static void DetectWarningHeavyCriticalPath(BuildReport report, List<AnalysisFinding> findings, AnalyzerThresholds thr)
     {
         var heavy = report.CriticalPath
-            .Where(p => p.WarningCount > WarningsOnCriticalPathMinPerProject)
+            .Where(p => p.WarningCount > thr.WarningsOnCriticalPathPerProject)
             .OrderByDescending(p => p.WarningCount)
             .ToList();
         if (heavy.Count == 0) return;
@@ -227,11 +220,11 @@ public static class BuildAnalyzer
             Title = $"Warnings concentrated on the blocking chain: {lines}",
             Severity = FindingSeverity.Warning,
             Confidence = FindingConfidence.High,
-            Measured = $"Blocking-chain projects with >{WarningsOnCriticalPathMinPerProject} warnings each: {lines}.{prefixMeasured}",
+            Measured = $"Blocking-chain projects with >{thr.WarningsOnCriticalPathPerProject} warnings each: {lines}.{prefixMeasured}",
             LikelyExplanation = null,
             InvestigationSuggestion = suggestion,
             Evidence = evidence,
-            ThresholdName = $"per-project warnings > {WarningsOnCriticalPathMinPerProject}",
+            ThresholdName = $"per-project warnings > {thr.WarningsOnCriticalPathPerProject}",
         });
     }
 

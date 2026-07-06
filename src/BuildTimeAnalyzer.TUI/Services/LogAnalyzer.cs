@@ -594,7 +594,8 @@ public sealed class LogAnalyzer
             })
             .OrderByDescending(t => t.SelfTime)
             .ToList();
-        var topTaskList = taskTimingList.Take(30).ToList();
+        // Honour --top for the task table too (was previously a hard-coded 30, ignoring the flag).
+        var topTaskList = taskTimingList.Take(_topTargets).ToList();
 
         // ── Analyzer reports (from ReportAnalyzer output in Csc messages) ──
         // Also drain any still-active tasks (task finish event may have been missing)
