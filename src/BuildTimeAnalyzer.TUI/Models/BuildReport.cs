@@ -13,7 +13,8 @@ public sealed record BuildReport
     public int UnattributedWarningCount => WarningCount - AttributedWarningCount;
 
     /// <summary>
-    /// Sum of exclusive self time across all reported projects. This is aggregate work, NOT wall-clock
+    /// Sum of exclusive self time across all completed build targets (target-level, so it also
+    /// captures work not attributed to a listed project). This is aggregate work, NOT wall-clock
     /// time — much of it runs in parallel. Defaults to zero when not populated (e.g. hand-built reports).
     /// </summary>
     public TimeSpan TotalSelfTime { get; init; }
@@ -119,7 +120,11 @@ public sealed record ProjectTiming
     /// <summary>Targets belonging to this project (ordered by SelfTime desc). Populated for drill-down candidates only.</summary>
     public IReadOnlyList<TargetTiming> Targets { get; init; } = [];
 
-    /// <summary>Per-category self time sums. Populated for drill-down candidates only.</summary>
+    /// <summary>
+    /// Per-category self time sums. Populated for every project (a cheap map lookup), so the HTML
+    /// flamegraph and the Top Consumers "Dominant" column can read it for any project — unlike the
+    /// heavier <see cref="Targets"/> list, which stays scoped to drill-down candidates.
+    /// </summary>
     public IReadOnlyDictionary<TargetCategory, TimeSpan> CategoryBreakdown { get; init; } =
         new Dictionary<TargetCategory, TimeSpan>();
 

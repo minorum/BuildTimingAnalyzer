@@ -180,7 +180,7 @@ public static class HtmlReportExporter
 </p>
 """);
 
-        // ── Strict layout: bottlenecks → blocking chain → top consumers → inspect next ──
+        // ── Strict layout: bottlenecks → flamegraph → blocking chain → top consumers → inspect next → per-project ──
         AppendTopBottlenecks(sb, analysis);
         AppendFlamegraph(sb, report);
         AppendBlockingChain(sb, report);
@@ -540,11 +540,13 @@ public static class HtmlReportExporter
 
     private static void AppendFlamegraph(StringBuilder sb, BuildReport report)
     {
-        var grandMs = report.TotalSelfTime.TotalMilliseconds;
-        var catSum = report.CategoryTotals.Sum(kv => kv.Value.TotalMilliseconds);
-        if (grandMs <= 0) grandMs = catSum;
-        // No self-time data at all (e.g. a fully-incremental build with nothing to do) — a root
-        // frame at 0% of 0 work is noise, so skip the section entirely.
+        // The tree is computed bottom-up (every parent = Σ its rendered children), so its root
+        // total is the exact sum of what the flamegraph draws — this keeps each frame's "% of all
+        // work" label consistent with its width at every level.
+        var tree = BuildFlameTree(report);
+        var grandMs = tree.Ms;
+        // No attributable per-project work (e.g. a fully-incremental build with nothing to do) — a
+        // root frame at 0% of 0 work is noise, so skip the section entirely.
         if (grandMs <= 0) return;
 
         var total = Esc(ConsoleReportRenderer.FormatDuration(report.TotalDuration));
@@ -558,7 +560,6 @@ public static class HtmlReportExporter
         sb.AppendLine("<h2>Where the Time Went</h2>");
         sb.AppendLine("<p class=\"note\">Wider = more time. Tap a block to see what it is; blocks with a › zoom in. Shows where the <strong>work</strong> went — the build finishes faster than the total work because much of it runs in parallel.</p>");
 
-        var tree = BuildFlameTree(report, grandMs);
         var minWidth = MaxRowChildren(tree) * 66;
 
         sb.AppendLine("<div class=\"flame-tool\">");
@@ -566,7 +567,9 @@ public static class HtmlReportExporter
         sb.AppendLine($"    <span class=\"ft-metric\"><b>{total}</b> total</span>");
         if (showWork) sb.AppendLine($"    <span class=\"ft-metric\"><b>{work}</b> work</span>");
         sb.AppendLine($"    <span class=\"ft-metric\"><b>{report.Projects.Count}</b> projects</span>");
-        if (par > 0) sb.AppendLine($"    <span class=\"ft-metric\"><b>{Esc(parStr)}</b> parallel</span>");
+        // Only surface parallelism once the build actually overlapped work (≥ 1×). Below 1× the
+        // build was mostly idle/serial, where "0.6× parallel" (or a rounded "0.0×") would mislead.
+        if (par >= 1.0) sb.AppendLine($"    <span class=\"ft-metric\"><b>{Esc(parStr)}</b> parallel</span>");
         sb.AppendLine("    <span class=\"ft-search\">\U0001F50D <input id=\"ftq\" placeholder=\"filter projects…\" aria-label=\"filter projects\"></span>");
         sb.AppendLine("  </div>");
         sb.AppendLine("  <div class=\"ft-crumbs\" id=\"ftcrumbs\"></div>");
@@ -584,35 +587,50 @@ public static class HtmlReportExporter
         sb.AppendLine("</script>");
     }
 
-    private static FlameNode BuildFlameTree(BuildReport report, double grandMs)
+    // Max per-category project frames before the rest roll up into a "N more projects" frame.
+    private const int MaxFlameProjectsPerCategory = 12;
+
+    private static FlameNode BuildFlameTree(BuildReport report)
     {
         var cats = new List<FlameNode>();
-        foreach (var cat in report.CategoryTotals.OrderByDescending(kv => kv.Value))
+        foreach (var cat in report.CategoryTotals.Keys)
         {
-            if (cat.Value.TotalMilliseconds <= 0) continue;
-            var (label, key) = FriendlyCategory(cat.Key);
+            var (label, key) = FriendlyCategory(cat);
 
+            // Per-project contributions to this category. CategoryBreakdown is keyed by project
+            // short name, and report.Projects can hold two projects that share a short name (same
+            // file name in different folders) which then carry the same merged breakdown — dedup by
+            // name so their combined time is counted once, not doubled.
             var contribs = report.Projects
-                .Select(p => (p.Name, Ms: p.CategoryBreakdown.GetValueOrDefault(cat.Key).TotalMilliseconds))
+                .Select(p => (p.Name, Ms: p.CategoryBreakdown.GetValueOrDefault(cat).TotalMilliseconds))
                 .Where(x => x.Ms > 0)
+                .DistinctBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
                 .OrderByDescending(x => x.Ms)
                 .ToList();
+            if (contribs.Count == 0) continue;
 
             var kids = new List<FlameNode>();
-            foreach (var c in contribs.Take(12))
+            foreach (var c in contribs.Take(MaxFlameProjectsPerCategory))
                 kids.Add(new FlameNode(c.Name, key, c.Ms, Array.Empty<FlameNode>()));
-            var tail = contribs.Skip(12).ToList();
+            var tail = contribs.Skip(MaxFlameProjectsPerCategory).ToList();
             if (tail.Count > 0)
-                kids.Add(new FlameNode($"{tail.Count} more projects", key, tail.Sum(x => x.Ms), Array.Empty<FlameNode>()));
+            {
+                var tailLabel = tail.Count == 1 ? "1 more project" : $"{tail.Count} more projects";
+                kids.Add(new FlameNode(tailLabel, key, tail.Sum(x => x.Ms), Array.Empty<FlameNode>()));
+            }
 
-            cats.Add(new FlameNode(label, key, cat.Value.TotalMilliseconds, kids));
+            // Category width = Σ the project frames actually shown, so every parent equals the sum
+            // of its children and percentages reconcile with widths at every level.
+            cats.Add(new FlameNode(label, key, kids.Sum(k => k.Ms), kids));
         }
-        return new FlameNode("All build work", "root", grandMs, cats);
+        cats.Sort((a, b) => b.Ms.CompareTo(a.Ms));
+        return new FlameNode("All build work", "root", cats.Sum(c => c.Ms), cats);
     }
 
+    // grandMs is the root total and is always > 0 here (AppendFlamegraph returns early otherwise).
     private static void RenderFlameNode(StringBuilder sb, FlameNode node, double grandMs, bool isRoot)
     {
-        var pct = grandMs > 0 ? node.Ms / grandMs * 100 : 0;
+        var pct = node.Ms / grandMs * 100;
         var pctStr = pct.ToString("0.0", CultureInfo.InvariantCulture);
         var time = ConsoleReportRenderer.FormatDuration(TimeSpan.FromMilliseconds(node.Ms));
         var hasKids = node.Children.Count > 0;
@@ -653,6 +671,9 @@ public static class HtmlReportExporter
 
     private sealed record FlameNode(string Name, string Key, double Ms, IReadOnlyList<FlameNode> Children);
 
+    // Beginner-friendly labels for the flamegraph (deliberately different from ConsoleReportRenderer.
+    // CategoryLabel). The returned Key must have a matching `.ftc-<key>` colour rule in FlameCss and a
+    // matching entry in the FlameScript FT_DESC map — a new key without both falls back to "other".
     private static (string Label, string Key) FriendlyCategory(TargetCategory c) => c switch
     {
         TargetCategory.Compile => ("Compiling code", "compile"),
