@@ -13,6 +13,20 @@ public sealed record BuildReport
     public int UnattributedWarningCount => WarningCount - AttributedWarningCount;
 
     /// <summary>
+    /// Sum of exclusive self time across all reported projects. This is aggregate work, NOT wall-clock
+    /// time — much of it runs in parallel. Defaults to zero when not populated (e.g. hand-built reports).
+    /// </summary>
+    public TimeSpan TotalSelfTime { get; init; }
+
+    /// <summary>
+    /// Achieved parallelism: total work ÷ wall-clock. ~1 means the build ran effectively serially;
+    /// higher means more work overlapped in time (e.g. 3.5×). Zero when wall-clock is unknown.
+    /// </summary>
+    public double AchievedParallelism => TotalDuration.TotalMilliseconds > 0
+        ? TotalSelfTime.TotalMilliseconds / TotalDuration.TotalMilliseconds
+        : 0;
+
+    /// <summary>
     /// Per-code warning tallies (e.g. CS8600 → 42). Built from BuildWarningEventArgs.Code
     /// captured in the binlog — does not require the text build log. Empty when no warnings
     /// carried a recognizable code.

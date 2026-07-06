@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using BuildTimeAnalyzer.Models;
 using BuildTimeAnalyzer.Rendering;
@@ -181,6 +182,7 @@ public static class HtmlReportExporter
 
         // ── Strict layout: bottlenecks → blocking chain → top consumers → inspect next ──
         AppendTopBottlenecks(sb, analysis);
+        AppendFlamegraph(sb, report);
         AppendBlockingChain(sb, report);
         AppendTopConsumers(sb, report);
         AppendInspectNext(sb, analysis);
@@ -533,6 +535,277 @@ public static class HtmlReportExporter
 
         return sb.ToString();
     }
+
+    // ─────────────────────────── Flamegraph ───────────────────────────
+
+    private static void AppendFlamegraph(StringBuilder sb, BuildReport report)
+    {
+        var grandMs = report.TotalSelfTime.TotalMilliseconds;
+        var catSum = report.CategoryTotals.Sum(kv => kv.Value.TotalMilliseconds);
+        if (grandMs <= 0) grandMs = catSum;
+
+        var total = Esc(ConsoleReportRenderer.FormatDuration(report.TotalDuration));
+        var work = Esc(ConsoleReportRenderer.FormatDuration(report.TotalSelfTime));
+        var showWork = report.TotalSelfTime > TimeSpan.Zero;
+        var par = report.AchievedParallelism;
+        var parStr = par.ToString("0.0", CultureInfo.InvariantCulture) + "×";
+
+        sb.AppendLine(FlameCss);
+
+        sb.AppendLine("<h2>Where the Time Went</h2>");
+        sb.AppendLine("<p class=\"note\">Wider = more time. Tap a block to see what it is; blocks with a › zoom in. Shows where the <strong>work</strong> went — the build finishes faster than the total work because much of it runs in parallel.</p>");
+
+        var tree = BuildFlameTree(report, grandMs);
+        var minWidth = MaxRowChildren(tree) * 66;
+
+        sb.AppendLine("<div class=\"flame-tool\">");
+        sb.AppendLine("  <div class=\"ft-toolbar\">");
+        sb.AppendLine($"    <span class=\"ft-metric\"><b>{total}</b> total</span>");
+        if (showWork) sb.AppendLine($"    <span class=\"ft-metric\"><b>{work}</b> work</span>");
+        sb.AppendLine($"    <span class=\"ft-metric\"><b>{report.Projects.Count}</b> projects</span>");
+        if (par > 0) sb.AppendLine($"    <span class=\"ft-metric\"><b>{Esc(parStr)}</b> parallel</span>");
+        sb.AppendLine("    <span class=\"ft-search\">\U0001F50D <input id=\"ftq\" placeholder=\"filter projects…\" aria-label=\"filter projects\"></span>");
+        sb.AppendLine("  </div>");
+        sb.AppendLine("  <div class=\"ft-crumbs\" id=\"ftcrumbs\"></div>");
+
+        // The flamegraph is fully static HTML — every value is HTML-escaped like the rest of the
+        // report. The script below only reads the rendered DOM (data-* attributes); there is no
+        // embedded data blob, so nothing needs script-context escaping.
+        sb.Append("  <div class=\"ft-wrap\"><div id=\"ftflame\" style=\"min-width:").Append(minWidth).Append("px\">");
+        RenderFlameNode(sb, tree, grandMs, true);
+        sb.AppendLine("</div></div>");
+        sb.AppendLine("</div>");
+        sb.AppendLine("<div id=\"ftcard\" role=\"dialog\"><div class=\"ftc-h\"><span class=\"ftc-sw\"></span><span class=\"ftc-t\"></span></div><div class=\"ftc-v\"></div><div class=\"ftc-d\"></div><div class=\"ftc-acts\"><button class=\"ftc-zoom\" hidden>Zoom in ›</button><button class=\"ftc-close\">Close</button></div></div>");
+        sb.AppendLine("<script>");
+        sb.AppendLine(FlameScript);
+        sb.AppendLine("</script>");
+    }
+
+    private static FlameNode BuildFlameTree(BuildReport report, double grandMs)
+    {
+        var cats = new List<FlameNode>();
+        foreach (var cat in report.CategoryTotals.OrderByDescending(kv => kv.Value))
+        {
+            if (cat.Value.TotalMilliseconds <= 0) continue;
+            var (label, key) = FriendlyCategory(cat.Key);
+
+            var contribs = report.Projects
+                .Select(p => (p.Name, Ms: p.CategoryBreakdown.GetValueOrDefault(cat.Key).TotalMilliseconds))
+                .Where(x => x.Ms > 0)
+                .OrderByDescending(x => x.Ms)
+                .ToList();
+
+            var kids = new List<FlameNode>();
+            foreach (var c in contribs.Take(12))
+                kids.Add(new FlameNode(c.Name, key, c.Ms, Array.Empty<FlameNode>()));
+            var tail = contribs.Skip(12).ToList();
+            if (tail.Count > 0)
+                kids.Add(new FlameNode($"{tail.Count} more projects", key, tail.Sum(x => x.Ms), Array.Empty<FlameNode>()));
+
+            cats.Add(new FlameNode(label, key, cat.Value.TotalMilliseconds, kids));
+        }
+        return new FlameNode("All build work", "root", grandMs, cats);
+    }
+
+    private static void RenderFlameNode(StringBuilder sb, FlameNode node, double grandMs, bool isRoot)
+    {
+        var pct = grandMs > 0 ? node.Ms / grandMs * 100 : 0;
+        var pctStr = pct.ToString("0.0", CultureInfo.InvariantCulture);
+        var time = ConsoleReportRenderer.FormatDuration(TimeSpan.FromMilliseconds(node.Ms));
+        var hasKids = node.Children.Count > 0;
+
+        sb.Append("<div class=\"ft-node\"");
+        if (!isRoot) sb.Append(" style=\"flex:").Append(Num(node.Ms)).Append(" 1 0\"");
+        sb.Append('>');
+
+        sb.Append("<div class=\"ft-frame ftc-").Append(node.Key).Append('"')
+          .Append(" data-name=\"").Append(Esc(node.Name)).Append('"')
+          .Append(" data-type=\"").Append(node.Key).Append('"')
+          .Append(" data-time=\"").Append(Esc(time)).Append('"')
+          .Append(" data-pct=\"").Append(pctStr).Append('"')
+          .Append(" data-haskids=\"").Append(hasKids ? "1" : "0").Append('"')
+          .Append(" title=\"").Append(Esc($"{node.Name}: {time} · {pctStr}% of all work")).Append("\">")
+          .Append("<span class=\"ft-lab\">").Append(Esc(node.Name)).Append("</span>");
+        if (pct >= 9) sb.Append("<span class=\"ft-pct\">").Append(pct.ToString("0", CultureInfo.InvariantCulture)).Append("%</span>");
+        if (hasKids && !isRoot) sb.Append("<span class=\"ft-kids\">›</span>");
+        sb.Append("</div>");
+
+        if (hasKids)
+        {
+            sb.Append("<div class=\"ft-row\">");
+            foreach (var child in node.Children)
+                RenderFlameNode(sb, child, grandMs, false);
+            sb.Append("</div>");
+        }
+        sb.Append("</div>");
+    }
+
+    private static int MaxRowChildren(FlameNode node)
+    {
+        var max = node.Children.Count;
+        foreach (var c in node.Children)
+            max = Math.Max(max, MaxRowChildren(c));
+        return max;
+    }
+
+    private sealed record FlameNode(string Name, string Key, double Ms, IReadOnlyList<FlameNode> Children);
+
+    private static (string Label, string Key) FriendlyCategory(TargetCategory c) => c switch
+    {
+        TargetCategory.Compile => ("Compiling code", "compile"),
+        TargetCategory.Restore => ("Fetching packages", "pkg"),
+        TargetCategory.Copy => ("Copying output", "copy"),
+        TargetCategory.StaticWebAssets => ("Web assets", "web"),
+        TargetCategory.SourceGen => ("Source generators", "sourcegen"),
+        TargetCategory.References => ("Resolving references", "refs"),
+        TargetCategory.Other => ("Build setup", "misc"),
+        TargetCategory.Uncategorized => ("Other work", "other"),
+        _ => ("Other", "other"),
+    };
+
+    private static string Num(double ms) => ((long)ms).ToString(CultureInfo.InvariantCulture);
+
+    private const string FlameCss = """
+<style>
+  .flame-tool { font-family: Consolas, ui-monospace, monospace; margin: 4px 0 8px; }
+  .ft-toolbar { display:flex; align-items:center; gap:10px 16px; flex-wrap:wrap; background:#161b22; border:1px solid #30363d; border-radius:8px; padding:10px 14px; }
+  .ft-metric { font-size:0.8rem; color:#8b949e; } .ft-metric b { color:#e6edf3; font-size:0.95rem; }
+  .ft-search { flex:1 1 150px; display:flex; align-items:center; gap:6px; border:1px solid #30363d; border-radius:6px; padding:5px 9px; background:#0d1117; }
+  .ft-search input { border:none; background:none; outline:none; color:#e6edf3; font:inherit; font-size:0.8rem; width:100%; min-width:0; }
+  .ft-crumbs { display:flex; align-items:center; gap:6px; flex-wrap:wrap; padding:10px 2px 4px; font-size:0.8rem; }
+  .ft-crumbs .ft-cr { color:#58a6ff; cursor:pointer; border:none; background:none; padding:4px 2px; font:inherit; }
+  .ft-crumbs .ft-cr:hover { text-decoration:underline; }
+  .ft-crumbs .ft-sep { color:#8b949e; } .ft-crumbs .ft-cur { color:#8b949e; }
+  .ft-crumbs .ft-reset { margin-left:auto; color:#8b949e; cursor:pointer; border:1px solid #30363d; background:#0d1117; border-radius:6px; padding:5px 9px; font:inherit; }
+  .ft-wrap { overflow-x:auto; padding-bottom:6px; }
+  #ftflame { min-width:100%; }
+  .ft-node { display:flex; flex-direction:column; min-width:0; }
+  .ft-row { display:flex; gap:3px; min-width:0; }
+  .ft-frame { height:34px; border-radius:4px; display:flex; align-items:center; padding:0 8px; font-size:0.78rem; color:#14100a; white-space:nowrap; overflow:hidden; border:1px solid rgba(0,0,0,.22); cursor:pointer; margin-bottom:3px; outline:2px solid transparent; }
+  .ft-frame:hover { filter:brightness(1.08); }
+  .ft-frame .ft-lab { font-weight:700; overflow:hidden; text-overflow:ellipsis; }
+  .ft-frame .ft-pct { opacity:.72; margin-left:7px; font-weight:500; }
+  .ft-frame .ft-kids { opacity:.6; margin-left:6px; font-weight:700; }
+  .ft-frame.ft-dim { opacity:.26; } .ft-frame.ft-match, .ft-frame.ft-sel { outline-color:#58a6ff; }
+  .ftc-root { background:#57606a; color:#fff; }
+  .ftc-compile { background:#ec6a43; } .ftc-pkg { background:#f2953c; } .ftc-copy { background:#e0b93a; }
+  .ftc-web { background:#d98a58; } .ftc-sourcegen { background:#e0714f; } .ftc-refs { background:#c58a4a; }
+  .ftc-misc { background:#8b98a8; } .ftc-other { background:#b0a99c; }
+  .ft-hidden { display:none !important; }
+  .ft-node.ft-focus { flex:1 1 100% !important; }
+  #ftcard { position:fixed; z-index:40; left:16px; right:16px; bottom:16px; background:#161b22; border:1px solid #30363d; border-radius:12px; padding:14px 15px; box-shadow:0 8px 30px rgba(0,0,0,.5); transform:translateY(160%); transition:transform .18s ease; }
+  #ftcard.ft-show { transform:translateY(0); }
+  #ftcard .ftc-h { display:flex; align-items:center; gap:8px; font-weight:700; font-size:0.95rem; color:#e6edf3; }
+  #ftcard .ftc-sw { width:12px; height:12px; border-radius:3px; flex:none; }
+  #ftcard .ftc-v { color:#58a6ff; font-size:0.82rem; margin:5px 0 7px; }
+  #ftcard .ftc-d { color:#8b949e; font-size:0.85rem; line-height:1.5; }
+  #ftcard .ftc-acts { display:flex; gap:8px; margin-top:12px; }
+  #ftcard button { font:inherit; font-size:0.85rem; border-radius:8px; padding:9px 14px; cursor:pointer; border:1px solid #30363d; }
+  #ftcard .ftc-zoom { background:#238636; color:#fff; border-color:#238636; font-weight:700; }
+  #ftcard .ftc-close { background:#21262d; color:#8b949e; margin-left:auto; }
+  @media (min-width:721px) { #ftcard { left:auto; width:340px; } }
+  @media (prefers-reduced-motion: reduce) { #ftcard { transition:none; } }
+</style>
+""";
+
+    // Progressive enhancement only. The flamegraph is already fully rendered as static HTML; this
+    // script reads the DOM (data-* attributes) to add zoom, filtering and the info card. It never
+    // parses embedded data, so there is no script-context escaping to get wrong.
+    private const string FlameScript = """
+const FT_DESC = {
+  root: "Everything the build did, added up. Tap the coloured blocks to break it down.",
+  compile: "Turning your source into a DLL. Usually the biggest cost.",
+  pkg: "Working out which NuGet packages each project needs.",
+  copy: "Copying built files into each project's output folder.",
+  web: "Bundling and processing CSS/JS web assets.",
+  sourcegen: "Running source generators and analyzers.",
+  refs: "Resolving assembly and framework references.",
+  misc: "General build setup and SDK plumbing.",
+  other: "Work that did not match a known category."
+};
+const ftFlame = document.getElementById('ftflame');
+const ftCrumbs = document.getElementById('ftcrumbs');
+const ftCard = document.getElementById('ftcard');
+const ftQ = document.getElementById('ftq');
+let ftSel = null;
+
+function ftRootNode() { return ftFlame.querySelector(':scope > .ft-node'); }
+
+function ftClearZoom() {
+  ftFlame.querySelectorAll('.ft-hidden').forEach(function (e) { e.classList.remove('ft-hidden'); });
+  ftFlame.querySelectorAll('.ft-focus').forEach(function (e) { e.classList.remove('ft-focus'); });
+}
+
+function ftZoomTo(nodeEl) {
+  ftClearZoom();
+  var ancestors = [];
+  var cur = nodeEl;
+  while (cur.parentElement && cur.parentElement !== ftFlame) {
+    var row = cur.parentElement;
+    var parentNode = row.parentElement;
+    Array.prototype.forEach.call(row.children, function (sib) { if (sib !== cur) sib.classList.add('ft-hidden'); });
+    var pf = parentNode.querySelector(':scope > .ft-frame');
+    if (pf) { pf.classList.add('ft-hidden'); ancestors.unshift(pf); }
+    cur = parentNode;
+  }
+  if (nodeEl !== ftRootNode()) nodeEl.classList.add('ft-focus');
+  ftDrawCrumbs(ancestors, nodeEl.querySelector(':scope > .ft-frame'));
+  ftFilter(ftQ.value);
+}
+
+function ftResetZoom() { ftClearZoom(); ftCrumbs.innerHTML = ''; ftFilter(ftQ.value); }
+
+function ftDrawCrumbs(ancestorFrames, focusFrame) {
+  ftCrumbs.innerHTML = '';
+  if (!ancestorFrames.length) return;
+  var frames = ancestorFrames.concat([focusFrame]);
+  frames.forEach(function (fr, i) {
+    if (i) { var s = document.createElement('span'); s.className = 'ft-sep'; s.textContent = '▸'; ftCrumbs.appendChild(s); }
+    if (i === frames.length - 1) { var c = document.createElement('span'); c.className = 'ft-cur'; c.textContent = fr.dataset.name; ftCrumbs.appendChild(c); }
+    else { var b = document.createElement('button'); b.className = 'ft-cr'; b.textContent = fr.dataset.name; b.onclick = function (e) { e.stopPropagation(); ftZoomTo(fr.parentElement); }; ftCrumbs.appendChild(b); }
+  });
+  var r = document.createElement('button'); r.className = 'ft-reset'; r.textContent = '↺ reset'; r.onclick = function (e) { e.stopPropagation(); ftResetZoom(); }; ftCrumbs.appendChild(r);
+}
+
+function ftSelect(frameEl) {
+  ftSel = frameEl;
+  ftFlame.querySelectorAll('.ft-frame.ft-sel').forEach(function (x) { x.classList.remove('ft-sel'); });
+  frameEl.classList.add('ft-sel');
+  var type = frameEl.dataset.type || 'other';
+  ftCard.querySelector('.ftc-sw').className = 'ftc-sw ftc-' + type;
+  ftCard.querySelector('.ftc-t').textContent = frameEl.dataset.name;
+  ftCard.querySelector('.ftc-v').textContent = frameEl.dataset.time + ' · ' + frameEl.dataset.pct + '% of all work';
+  ftCard.querySelector('.ftc-d').textContent = FT_DESC[type] || '';
+  var nodeEl = frameEl.parentElement;
+  var zoom = ftCard.querySelector('.ftc-zoom');
+  var canZoom = frameEl.dataset.haskids === '1' && nodeEl !== ftRootNode() && !nodeEl.classList.contains('ft-focus');
+  zoom.hidden = !canZoom;
+  zoom.onclick = function () { ftZoomTo(nodeEl); ftClose(); };
+  ftCard.classList.add('ft-show');
+}
+function ftClose() { ftCard.classList.remove('ft-show'); ftSel = null; ftFlame.querySelectorAll('.ft-frame.ft-sel').forEach(function (x) { x.classList.remove('ft-sel'); }); }
+
+function ftFilter(q) {
+  q = (q || '').trim().toLowerCase();
+  ftFlame.querySelectorAll('.ft-frame').forEach(function (f) {
+    f.classList.remove('ft-match', 'ft-dim');
+    if (!q) return;
+    if ((f.dataset.name || '').toLowerCase().indexOf(q) >= 0) f.classList.add('ft-match'); else f.classList.add('ft-dim');
+  });
+}
+
+ftFlame.addEventListener('click', function (e) {
+  var f = e.target.closest('.ft-frame');
+  if (!f) return;
+  e.stopPropagation();
+  ftSelect(f);
+});
+ftCard.querySelector('.ftc-close').onclick = ftClose;
+ftCard.addEventListener('click', function (e) { e.stopPropagation(); });
+document.addEventListener('click', function () { if (ftSel) ftClose(); });
+ftQ.addEventListener('input', function (e) { ftFilter(e.target.value); });
+ftQ.addEventListener('click', function (e) { e.stopPropagation(); });
+""";
 
     // Cap at 5 per the spec — "Top bottlenecks (3–5 findings maximum)".
     private const int MaxBottlenecks = 5;

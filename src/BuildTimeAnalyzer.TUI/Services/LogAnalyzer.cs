@@ -656,6 +656,7 @@ public sealed class LogAnalyzer
             Projects = projectList,
             TopTargets = topTargetList,
             TopTasks = topTaskList,
+            TotalSelfTime = TimeSpan.FromMilliseconds(totalSelfMs),
             TfmNegotiationTotal = tfmNegotiationTotal,
             SkipReasons = skipInfos,
             AnalyzerReports = analyzerReports,

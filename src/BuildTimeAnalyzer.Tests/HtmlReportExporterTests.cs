@@ -217,4 +217,70 @@ public sealed class HtmlReportExporterTests
         }
         finally { File.Delete(path); }
     }
+
+    [Test]
+    public async Task Export_ContainsFlamegraph()
+    {
+        var report = CreateSampleReport() with
+        {
+            TotalSelfTime = TimeSpan.FromSeconds(12.5),
+            CategoryTotals = new Dictionary<TargetCategory, TimeSpan>
+            {
+                [TargetCategory.Compile] = TimeSpan.FromSeconds(12.5),
+            },
+        };
+        var path = Path.Combine(Path.GetTempPath(), $"test-{Guid.NewGuid():N}.html");
+        try
+        {
+            HtmlReportExporter.Export(report, path);
+            var html = File.ReadAllText(path);
+            await Assert.That(html).Contains("Where the Time Went");
+            await Assert.That(html).Contains("id=\"ftflame\"");
+            // Frames are rendered as static HTML — no embedded JSON data blob.
+            await Assert.That(html).Contains("ft-frame");
+            await Assert.That(html).DoesNotContain("application/json");
+            // 12.5s work / 20s wall clock => 0.6x parallel
+            await Assert.That(html).Contains("parallel");
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Test]
+    public async Task Export_FlamegraphEscapesProjectNames()
+    {
+        var project = new ProjectTiming
+        {
+            Name = "</script><img src=x>",
+            FullPath = "C:\\src\\evil.csproj",
+            SelfTime = TimeSpan.FromSeconds(5),
+            Succeeded = true,
+            ErrorCount = 0,
+            WarningCount = 0,
+            SelfPercent = 100,
+            StartOffset = TimeSpan.Zero,
+            EndOffset = TimeSpan.FromSeconds(5),
+            CategoryBreakdown = new Dictionary<TargetCategory, TimeSpan>
+            {
+                [TargetCategory.Compile] = TimeSpan.FromSeconds(5),
+            },
+        };
+        var report = CreateSampleReport(overrideProject: project) with
+        {
+            TotalSelfTime = TimeSpan.FromSeconds(5),
+            CategoryTotals = new Dictionary<TargetCategory, TimeSpan>
+            {
+                [TargetCategory.Compile] = TimeSpan.FromSeconds(5),
+            },
+        };
+        var path = Path.Combine(Path.GetTempPath(), $"test-{Guid.NewGuid():N}.html");
+        try
+        {
+            HtmlReportExporter.Export(report, path);
+            var html = File.ReadAllText(path);
+            // The project name is a flamegraph frame label; it must be HTML-escaped there too.
+            await Assert.That(html).DoesNotContain("<img src=x>");
+            await Assert.That(html).Contains("&lt;/script&gt;&lt;img src=x&gt;");
+        }
+        finally { File.Delete(path); }
+    }
 }

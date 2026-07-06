@@ -22,6 +22,9 @@ public static class JsonReportExporter
         EndTime = report.EndTime,
         WallClock = ConsoleReportRenderer.FormatDuration(report.TotalDuration),
         WallClockMs = (long)report.TotalDuration.TotalMilliseconds,
+        TotalSelfTime = ConsoleReportRenderer.FormatDuration(report.TotalSelfTime),
+        TotalSelfTimeMs = (long)report.TotalSelfTime.TotalMilliseconds,
+        AchievedParallelism = Math.Round(report.AchievedParallelism, 2),
         ErrorCount = report.ErrorCount,
         WarningCount = report.WarningCount,
         AttributedWarningCount = report.AttributedWarningCount,
@@ -285,6 +288,9 @@ internal sealed class JsonReportDto
     public required DateTime EndTime { get; init; }
     public required string WallClock { get; init; }
     public required long WallClockMs { get; init; }
+    public required string TotalSelfTime { get; init; }
+    public required long TotalSelfTimeMs { get; init; }
+    public required double AchievedParallelism { get; init; }
     public required int ErrorCount { get; init; }
     public required int WarningCount { get; init; }
     public required int AttributedWarningCount { get; init; }
