@@ -25,8 +25,9 @@ public static class BuildCommand
 
         var config = BtaConfig.Load(settings.ConfigPath, projectPath);
 
-        var extra = settings.ExtraArgs?.Split(' ', StringSplitOptions.RemoveEmptyEntries)
-                    ?? Array.Empty<string>();
+        // Quote-aware split so an extra arg containing spaces (e.g. -p:DefineConstants="A B") is
+        // preserved as one token rather than shattered on every space.
+        var extra = CommandLineArgs.Split(settings.ExtraArgs);
 
         // Caller owns the binlog path so it can always be cleaned up — even if the build is
         // cancelled before BuildRunner returns.

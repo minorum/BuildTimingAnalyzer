@@ -66,6 +66,36 @@ public sealed class BuildComparisonTests
     }
 
     [Test]
+    public async Task Compare_DisambiguatesProjectsByFullPath()
+    {
+        // Two projects share the short name "Common" but live in different folders. Keyed by name
+        // they would collapse; keyed by full path they stay distinct.
+        var baseline = new BuildSnapshot
+        {
+            Projects =
+            [
+                new SnapshotProject { Name = "Common", SelfTimeMs = 100, FullPath = "/a/Common.csproj" },
+                new SnapshotProject { Name = "Common", SelfTimeMs = 100, FullPath = "/b/Common.csproj" },
+            ],
+        };
+        var current = new BuildSnapshot
+        {
+            Projects =
+            [
+                new SnapshotProject { Name = "Common", SelfTimeMs = 150, FullPath = "/a/Common.csproj" },  // +50
+                new SnapshotProject { Name = "Common", SelfTimeMs = 900, FullPath = "/b/Common.csproj" },  // +800
+            ],
+        };
+
+        var result = BuildComparison.Compare(baseline, current);
+
+        // Both regressed and are reported separately. Keyed by name they would collapse to a single
+        // entry (and drop the +800 regression entirely).
+        await Assert.That(result.Regressions.Count).IsEqualTo(2);
+        await Assert.That(result.Regressions[0].DeltaMs).IsEqualTo(800L);
+    }
+
+    [Test]
     public async Task ReadFromJsonReport_RoundTripsExportedReport()
     {
         var report = SampleReports.Minimal(wallSeconds: 20, projectName: "MyApp", projectSelfSeconds: 12);

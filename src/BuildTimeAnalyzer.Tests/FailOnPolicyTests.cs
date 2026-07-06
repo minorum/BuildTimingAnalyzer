@@ -76,6 +76,42 @@ public sealed class FailOnPolicyTests
     }
 
     [Test]
+    public async Task Wallclock_MissingArgument_TripsAsMisconfiguration()
+    {
+        var result = FailOnPolicy.Evaluate("wallclock", SampleReports.Minimal(wallSeconds: 1), Analysis(), null);
+        await Assert.That(result.Tripped).IsTrue();
+    }
+
+    [Test]
+    public async Task Wallclock_Typo_TripsAsUnknownRule()
+    {
+        // "wallclock10" (missing colon) must not be silently treated as a valid rule.
+        var result = FailOnPolicy.Evaluate("wallclock10", SampleReports.Minimal(wallSeconds: 1), Analysis(), null);
+        await Assert.That(result.Tripped).IsTrue();
+    }
+
+    [Test]
+    public async Task Regression_InvalidArgument_Trips()
+    {
+        var baseline = new BuildSnapshot { WallClockMs = 1000, TotalSelfTimeMs = 1000 };
+        var current = new BuildSnapshot { WallClockMs = 1000, TotalSelfTimeMs = 1000 };
+        var comparison = BuildComparison.Compare(baseline, current);
+        var result = FailOnPolicy.Evaluate("regression:abc", SampleReports.Minimal(), Analysis(), comparison);
+        await Assert.That(result.Tripped).IsTrue();
+    }
+
+    [Test]
+    public async Task Regression_BareRule_DefaultsToTenPercent()
+    {
+        var baseline = new BuildSnapshot { WallClockMs = 1000, TotalSelfTimeMs = 1000 };
+        var over = BuildComparison.Compare(baseline, new BuildSnapshot { WallClockMs = 1000, TotalSelfTimeMs = 1150 });   // +15%
+        var under = BuildComparison.Compare(baseline, new BuildSnapshot { WallClockMs = 1000, TotalSelfTimeMs = 1050 });  // +5%
+
+        await Assert.That(FailOnPolicy.Evaluate("regression", SampleReports.Minimal(), Analysis(), over).Tripped).IsTrue();
+        await Assert.That(FailOnPolicy.Evaluate("regression", SampleReports.Minimal(), Analysis(), under).Tripped).IsFalse();
+    }
+
+    [Test]
     public async Task MultipleRules_AreCombined()
     {
         var report = SampleReports.Minimal(wallSeconds: 20);

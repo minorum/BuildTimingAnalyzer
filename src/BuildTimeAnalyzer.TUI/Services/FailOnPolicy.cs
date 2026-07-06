@@ -52,15 +52,35 @@ public static class FailOnPolicy
                 if (!report.Succeeded || report.ErrorCount > 0)
                     reasons.Add($"build not clean ({report.ErrorCount} error(s), succeeded={report.Succeeded})");
             }
-            else if (token.StartsWith("wallclock", StringComparison.Ordinal))
+            else if (token == "wallclock" || token.StartsWith("wallclock:", StringComparison.Ordinal))
             {
-                var secs = ParseArg(token, defaultVal: 0);
-                if (secs > 0 && report.TotalDuration.TotalSeconds > secs)
-                    reasons.Add($"wall-clock {report.TotalDuration.TotalSeconds:F0}s exceeds {secs:F0}s");
+                // wallclock has no sensible default (0 = disabled), so a missing/invalid argument is
+                // a misconfiguration that must trip — not silently pass.
+                var secs = TryParseArg(token);
+                if (secs is not > 0)
+                    reasons.Add($"invalid --fail-on rule '{raw}' (expected wallclock:<positive seconds>)");
+                else if (report.TotalDuration.TotalSeconds > secs.Value)
+                    reasons.Add($"wall-clock {report.TotalDuration.TotalSeconds:F0}s exceeds {secs.Value:F0}s");
             }
-            else if (token.StartsWith("regression", StringComparison.Ordinal))
+            else if (token == "regression" || token.StartsWith("regression:", StringComparison.Ordinal))
             {
-                var pct = ParseArg(token, defaultVal: 10);
+                // Bare `regression` defaults to 10%; `regression:<n>` must be a positive number.
+                double pct;
+                if (token == "regression")
+                {
+                    pct = 10;
+                }
+                else
+                {
+                    var parsed = TryParseArg(token);
+                    if (parsed is not > 0)
+                    {
+                        reasons.Add($"invalid --fail-on rule '{raw}' (expected regression:<positive percent>)");
+                        continue;
+                    }
+                    pct = parsed.Value;
+                }
+
                 if (comparison is null)
                     reasons.Add("regression rule set but no --compare baseline provided");
                 else if (comparison.WorstRegressionPercent > pct)
@@ -77,13 +97,13 @@ public static class FailOnPolicy
         return new Result { Tripped = reasons.Count > 0, Reasons = reasons };
     }
 
-    // Parses the numeric argument from "name:VALUE"; returns defaultVal when absent/invalid.
-    private static double ParseArg(string token, double defaultVal)
+    // Parses the numeric argument from "name:VALUE"; returns null when absent or non-numeric.
+    private static double? TryParseArg(string token)
     {
         var idx = token.IndexOf(':');
-        if (idx < 0 || idx + 1 >= token.Length) return defaultVal;
+        if (idx < 0 || idx + 1 >= token.Length) return null;
         return double.TryParse(token[(idx + 1)..], NumberStyles.Any, CultureInfo.InvariantCulture, out var v)
             ? v
-            : defaultVal;
+            : null;
     }
 }

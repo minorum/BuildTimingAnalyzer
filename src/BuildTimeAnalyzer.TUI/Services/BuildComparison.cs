@@ -29,7 +29,12 @@ public sealed record BuildSnapshot
         AchievedParallelism = Math.Round(report.AchievedParallelism, 2),
         Succeeded = report.Succeeded,
         Projects = report.Projects
-            .Select(p => new SnapshotProject { Name = p.Name, SelfTimeMs = (long)p.SelfTime.TotalMilliseconds })
+            .Select(p => new SnapshotProject
+            {
+                Name = p.Name,
+                SelfTimeMs = (long)p.SelfTime.TotalMilliseconds,
+                FullPath = p.FullPath,
+            })
             .ToList(),
     };
 
@@ -51,7 +56,7 @@ public sealed record BuildSnapshot
                 Succeeded = dto.Succeeded,
                 Projects = (dto.Projects ?? [])
                     .Where(p => !string.IsNullOrEmpty(p.Name))
-                    .Select(p => new SnapshotProject { Name = p.Name!, SelfTimeMs = p.SelfTimeMs })
+                    .Select(p => new SnapshotProject { Name = p.Name!, SelfTimeMs = p.SelfTimeMs, FullPath = p.FullPath })
                     .ToList(),
             };
         }
@@ -66,6 +71,8 @@ public sealed record SnapshotProject
 {
     public required string Name { get; init; }
     public long SelfTimeMs { get; init; }
+    /// <summary>Full project path — the stable identity used to key comparisons (names can collide). Null on older reports.</summary>
+    public string? FullPath { get; init; }
 }
 
 /// <summary>A per-project delta between two snapshots (positive = slower now).</summary>
@@ -105,28 +112,33 @@ public static class BuildComparison
 {
     public static BuildComparisonResult Compare(BuildSnapshot baseline, BuildSnapshot current, int topN = 10)
     {
-        var baseByName = baseline.Projects
-            .GroupBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(g => g.Key, g => g.First().SelfTimeMs, StringComparer.OrdinalIgnoreCase);
-        var curByName = current.Projects
-            .GroupBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(g => g.Key, g => g.First().SelfTimeMs, StringComparer.OrdinalIgnoreCase);
+        // Key by full path so two projects that share a short name in different folders are not
+        // conflated (the analyzer already dedupes projects by full path). Fall back to the display
+        // name only when a snapshot predates full-path capture.
+        static string Key(SnapshotProject p) => string.IsNullOrEmpty(p.FullPath) ? p.Name : p.FullPath!;
+
+        var baseByKey = baseline.Projects
+            .GroupBy(Key, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+        var curByKey = current.Projects
+            .GroupBy(Key, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
 
         var deltas = new List<ProjectDelta>();
-        foreach (var kv in curByName)
+        foreach (var kv in curByKey)
         {
-            if (!baseByName.TryGetValue(kv.Key, out var baseMs)) continue;
-            deltas.Add(new ProjectDelta { Name = kv.Key, BaselineMs = baseMs, CurrentMs = kv.Value });
+            if (!baseByKey.TryGetValue(kv.Key, out var basep)) continue;
+            deltas.Add(new ProjectDelta { Name = kv.Value.Name, BaselineMs = basep.SelfTimeMs, CurrentMs = kv.Value.SelfTimeMs });
         }
 
         var regressions = deltas.Where(d => d.DeltaMs > 0)
             .OrderByDescending(d => d.DeltaMs).Take(topN).ToList();
         var improvements = deltas.Where(d => d.DeltaMs < 0)
             .OrderBy(d => d.DeltaMs).Take(topN).ToList();
-        var added = curByName.Keys.Where(k => !baseByName.ContainsKey(k))
-            .OrderBy(k => k, StringComparer.OrdinalIgnoreCase).ToList();
-        var removed = baseByName.Keys.Where(k => !curByName.ContainsKey(k))
-            .OrderBy(k => k, StringComparer.OrdinalIgnoreCase).ToList();
+        var added = curByKey.Where(kv => !baseByKey.ContainsKey(kv.Key))
+            .Select(kv => kv.Value.Name).OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+        var removed = baseByKey.Where(kv => !curByKey.ContainsKey(kv.Key))
+            .Select(kv => kv.Value.Name).OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
 
         return new BuildComparisonResult
         {
@@ -163,6 +175,7 @@ internal sealed class SnapshotProjectDto
 {
     public string? Name { get; init; }
     public long SelfTimeMs { get; init; }
+    public string? FullPath { get; init; }
 }
 
 [JsonSerializable(typeof(SnapshotDto))]
