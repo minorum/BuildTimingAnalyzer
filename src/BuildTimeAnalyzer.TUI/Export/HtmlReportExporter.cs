@@ -543,6 +543,9 @@ public static class HtmlReportExporter
         var grandMs = report.TotalSelfTime.TotalMilliseconds;
         var catSum = report.CategoryTotals.Sum(kv => kv.Value.TotalMilliseconds);
         if (grandMs <= 0) grandMs = catSum;
+        // No self-time data at all (e.g. a fully-incremental build with nothing to do) — a root
+        // frame at 0% of 0 work is noise, so skip the section entirely.
+        if (grandMs <= 0) return;
 
         var total = Esc(ConsoleReportRenderer.FormatDuration(report.TotalDuration));
         var work = Esc(ConsoleReportRenderer.FormatDuration(report.TotalSelfTime));
@@ -663,7 +666,9 @@ public static class HtmlReportExporter
         _ => ("Other", "other"),
     };
 
-    private static string Num(double ms) => ((long)ms).ToString(CultureInfo.InvariantCulture);
+    // CSS flex-grow value. Emit the raw millisecond magnitude (not truncated to an integer) so
+    // sub-millisecond frames keep a proportional, non-zero width instead of collapsing to flex:0.
+    private static string Num(double ms) => ms.ToString("0.###", CultureInfo.InvariantCulture);
 
     private const string FlameCss = """
 <style>

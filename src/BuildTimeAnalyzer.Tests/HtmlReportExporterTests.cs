@@ -221,7 +221,23 @@ public sealed class HtmlReportExporterTests
     [Test]
     public async Task Export_ContainsFlamegraph()
     {
-        var report = CreateSampleReport() with
+        var project = new ProjectTiming
+        {
+            Name = "MyApp",
+            FullPath = "C:\\src\\MyApp\\MyApp.csproj",
+            SelfTime = TimeSpan.FromSeconds(12.5),
+            Succeeded = true,
+            ErrorCount = 0,
+            WarningCount = 0,
+            SelfPercent = 100,
+            StartOffset = TimeSpan.Zero,
+            EndOffset = TimeSpan.FromSeconds(12.5),
+            CategoryBreakdown = new Dictionary<TargetCategory, TimeSpan>
+            {
+                [TargetCategory.Compile] = TimeSpan.FromSeconds(12.5),
+            },
+        };
+        var report = CreateSampleReport(overrideProject: project) with
         {
             TotalSelfTime = TimeSpan.FromSeconds(12.5),
             CategoryTotals = new Dictionary<TargetCategory, TimeSpan>
@@ -239,8 +255,12 @@ public sealed class HtmlReportExporterTests
             // Frames are rendered as static HTML — no embedded JSON data blob.
             await Assert.That(html).Contains("ft-frame");
             await Assert.That(html).DoesNotContain("application/json");
-            // 12.5s work / 20s wall clock => 0.6x parallel
-            await Assert.That(html).Contains("parallel");
+            // Category frame comes from CategoryTotals; the per-project child frame comes from
+            // the project's CategoryBreakdown — assert both are actually wired and rendered.
+            await Assert.That(html).Contains("Compiling code");
+            await Assert.That(html).Contains("data-name=\"MyApp\"");
+            // 12.5s work / 20s wall clock => 0.6× parallel (exact formatted value).
+            await Assert.That(html).Contains("0.6×");
         }
         finally { File.Delete(path); }
     }
