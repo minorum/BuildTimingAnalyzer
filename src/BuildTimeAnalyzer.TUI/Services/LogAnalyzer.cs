@@ -1,5 +1,6 @@
 using System.Collections;
 using BuildTimeAnalyzer.Models;
+using Microsoft.Build.Framework;
 using Microsoft.Build.Logging.StructuredLogger;
 
 namespace BuildTimeAnalyzer.Services;
@@ -20,9 +21,16 @@ public sealed class LogAnalyzer
         _topTargets = topTargets;
     }
 
-    public System.Threading.Tasks.Task<BuildReport> AnalyzeAsync(string binLogPath, string projectOrSolutionPath, CancellationToken ct = default)
+    public Task<BuildReport> AnalyzeAsync(
+        string binLogPath,
+        string projectOrSolutionPath,
+        CancellationToken ct = default
+    )
     {
-        return System.Threading.Tasks.Task.Run(() => Analyze(binLogPath, projectOrSolutionPath), ct);
+        return System.Threading.Tasks.Task.Run(
+            () => Analyze(binLogPath, projectOrSolutionPath),
+            ct
+        );
     }
 
     private BuildReport Analyze(string binLogPath, string projectOrSolutionPath)
@@ -30,10 +38,28 @@ public sealed class LogAnalyzer
         var projectTimings = new Dictionary<int, ProjectAccumulator>(256);
         var targetTimings = new List<RawTargetTiming>(4096);
 
-        var runningOrchTasks = new Dictionary<(int ProjectInstanceId, int TaskId), (int TargetId, DateTime StartTime)>();
+        var runningOrchTasks =
+            new Dictionary<
+                (int ProjectInstanceId, int TaskId),
+                (int TargetId, DateTime StartTime)
+            >();
         var orchTaskDurations = new Dictionary<(int ProjectInstanceId, int TargetId), TimeSpan>();
 
         var rawEdges = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+
+        // All task timings (not just orchestration)
+        var allRawTasks = new List<RawTaskTiming>(8192);
+        // Active Csc/Vbc tasks for collecting ReportAnalyzer messages
+        var activeCscTasks = new Dictionary<(int ProjectInstanceId, int TaskId), CscTaskAccumulator>();
+        var completedCscTasks = new List<CscTaskAccumulator>();
+        // Target skip reasons
+        var skipInfos = new List<TargetSkipInfo>();
+
+        // Open (unfinished) targets/tasks keyed by (project instance, id) → index into their list.
+        // Lets the *Finished events close their entry in O(1) instead of an O(n) reverse scan
+        // (which is quadratic over a parallel build's interleaved event stream).
+        var openTargets = new Dictionary<(int ProjectInstanceId, int TargetId), int>(4096);
+        var openTasks = new Dictionary<(int ProjectInstanceId, int TaskId), int>(8192);
 
         int executedTargets = 0;
         int skippedTargets = 0;
@@ -48,6 +74,7 @@ public sealed class LogAnalyzer
         int errorCount = 0;
         int warningCount = 0;
         int attributedWarningCount = 0;
+        var warningCodeCounts = new Dictionary<string, int>(StringComparer.Ordinal);
         DateTime buildStart = DateTime.MaxValue;
         DateTime buildEnd = DateTime.MinValue;
         bool succeeded = false;
@@ -56,151 +83,262 @@ public sealed class LogAnalyzer
 
         foreach (var record in reader.ReadRecords(binLogPath))
         {
-            if (record.Args is null) continue;
+            if (record.Args is null)
+                continue;
 
             switch (record.Args)
             {
-                case Microsoft.Build.Framework.BuildStartedEventArgs bse:
-                    if (bse.Timestamp < buildStart) buildStart = bse.Timestamp;
-                    CaptureBuildContext(bse, ref configuration, ref sdkVersion, ref msBuildVersion, ref operatingSystem, ref parallelism);
+                case BuildStartedEventArgs bse:
+                    if (bse.Timestamp < buildStart)
+                        buildStart = bse.Timestamp;
+                    CaptureBuildContext(
+                        bse,
+                        ref configuration,
+                        ref sdkVersion,
+                        ref msBuildVersion,
+                        ref operatingSystem,
+                        ref parallelism
+                    );
                     break;
 
-                case Microsoft.Build.Framework.BuildFinishedEventArgs bfe:
-                    if (bfe.Timestamp > buildEnd) buildEnd = bfe.Timestamp;
+                case BuildFinishedEventArgs bfe:
+                    if (bfe.Timestamp > buildEnd)
+                        buildEnd = bfe.Timestamp;
                     succeeded = bfe.Succeeded;
                     break;
 
-                case Microsoft.Build.Framework.ProjectStartedEventArgs pse:
-                    {
-                        var key = pse.BuildEventContext?.ProjectInstanceId ?? -1;
-                        if (key < 0) break;
-                        var projectFile = pse.ProjectFile ?? "";
-                        projectTimings.TryAdd(key, new ProjectAccumulator
+                case ProjectStartedEventArgs pse:
+                {
+                    var key = pse.BuildEventContext?.ProjectInstanceId ?? -1;
+                    if (key < 0)
+                        break;
+                    var projectFile = pse.ProjectFile ?? "";
+                    projectTimings.TryAdd(
+                        key,
+                        new ProjectAccumulator
                         {
-                            Name = Path.GetFileNameWithoutExtension(projectFile == "" ? "Unknown" : projectFile),
+                            Name = Path.GetFileNameWithoutExtension(
+                                projectFile == "" ? "Unknown" : projectFile
+                            ),
                             FullPath = projectFile,
                             StartTime = pse.Timestamp,
-                        });
-
-                        if (pse.Items is not null)
-                            ExtractProjectReferences(projectFile, pse.Items, rawEdges);
-
-                        if (configuration is null && pse.GlobalProperties is not null)
-                        {
-                            if (pse.GlobalProperties.TryGetValue("Configuration", out var cfg) && !string.IsNullOrEmpty(cfg))
-                                configuration = cfg;
                         }
+                    );
 
-                        if (!restoreObserved && pse.TargetNames is string tn && tn.Contains("Restore", StringComparison.OrdinalIgnoreCase))
-                            restoreObserved = true;
-                        break;
+                    if (pse.Items is not null)
+                        ExtractProjectReferences(projectFile, pse.Items, rawEdges);
+
+                    if (configuration is null && pse.GlobalProperties is not null)
+                    {
+                        if (
+                            pse.GlobalProperties.TryGetValue("Configuration", out var cfg)
+                            && !string.IsNullOrEmpty(cfg)
+                        )
+                            configuration = cfg;
                     }
 
-                case Microsoft.Build.Framework.ProjectEvaluationFinishedEventArgs pef:
+                    if (
+                        !restoreObserved
+                        && pse.TargetNames is string tn
+                        && tn.Contains("Restore", StringComparison.OrdinalIgnoreCase)
+                    )
+                        restoreObserved = true;
+                    break;
+                }
+
+                case ProjectEvaluationFinishedEventArgs pef:
                     if (pef.Items is not null && !string.IsNullOrEmpty(pef.ProjectFile))
                         ExtractProjectReferences(pef.ProjectFile, pef.Items, rawEdges);
                     break;
 
-                case Microsoft.Build.Framework.ProjectFinishedEventArgs pfe:
-                    {
-                        var key = pfe.BuildEventContext?.ProjectInstanceId ?? -1;
-                        if (key < 0 || !projectTimings.TryGetValue(key, out var acc)) break;
-                        acc.EndTime = pfe.Timestamp;
-                        acc.Succeeded = pfe.Succeeded;
+                case ProjectFinishedEventArgs pfe:
+                {
+                    var key = pfe.BuildEventContext?.ProjectInstanceId ?? -1;
+                    if (key < 0 || !projectTimings.TryGetValue(key, out var acc))
                         break;
-                    }
+                    acc.EndTime = pfe.Timestamp;
+                    acc.Succeeded = pfe.Succeeded;
+                    break;
+                }
 
-                case Microsoft.Build.Framework.TargetStartedEventArgs tse:
-                    {
-                        var ctx = tse.BuildEventContext;
-                        var targetId = ctx?.TargetId ?? -1;
-                        if (targetId < 0) break;
-                        targetTimings.Add(new RawTargetTiming
+                case TargetStartedEventArgs tse:
+                {
+                    var ctx = tse.BuildEventContext;
+                    var targetId = ctx?.TargetId ?? -1;
+                    if (targetId < 0)
+                        break;
+                    openTargets[(ctx!.ProjectInstanceId, targetId)] = targetTimings.Count;
+                    targetTimings.Add(
+                        new RawTargetTiming
                         {
                             Id = targetId,
                             ProjectInstanceId = ctx!.ProjectInstanceId,
                             Name = tse.TargetName ?? "Unknown",
                             ProjectName = Path.GetFileNameWithoutExtension(tse.ProjectFile ?? ""),
                             StartTime = tse.Timestamp,
-                        });
-                        executedTargets++;
-                        break;
-                    }
+                        }
+                    );
+                    executedTargets++;
+                    break;
+                }
 
-                case Microsoft.Build.Framework.TargetSkippedEventArgs:
+                case TargetSkippedEventArgs tsk:
                     skippedTargets++;
+                    skipInfos.Add(new TargetSkipInfo
+                    {
+                        TargetName = tsk.TargetName ?? "Unknown",
+                        ProjectName = Path.GetFileNameWithoutExtension(tsk.ProjectFile ?? ""),
+                        SkipReason = tsk.SkipReason.ToString(),
+                        Condition = tsk.Condition,
+                        EvaluatedCondition = tsk.EvaluatedCondition,
+                    });
                     break;
 
-                case Microsoft.Build.Framework.TargetFinishedEventArgs tfe:
+                case TargetFinishedEventArgs tfe:
+                {
+                    var ctx = tfe.BuildEventContext;
+                    var targetId = ctx?.TargetId ?? -1;
+                    var projInstanceId = ctx?.ProjectInstanceId ?? -1;
+                    if (targetId < 0)
+                        break;
+                    if (openTargets.Remove((projInstanceId, targetId), out var targetIndex)
+                        && targetTimings[targetIndex].EndTime == default)
                     {
-                        var ctx = tfe.BuildEventContext;
-                        var targetId = ctx?.TargetId ?? -1;
-                        var projInstanceId = ctx?.ProjectInstanceId ?? -1;
-                        if (targetId < 0) break;
-                        for (int i = targetTimings.Count - 1; i >= 0; i--)
+                        targetTimings[targetIndex] = targetTimings[targetIndex] with { EndTime = tfe.Timestamp };
+                    }
+                    break;
+                }
+
+                case TaskStartedEventArgs taskSe:
+                {
+                    var ctx = taskSe.BuildEventContext;
+                    if (ctx is not { ProjectInstanceId: >= 0, TargetId: >= 0, TaskId: >= 0 })
+                        break;
+
+                    // MSBuild/CallTarget are orchestration wrappers whose duration spans the whole
+                    // child build. They are used only to subtract from exclusive target time and must
+                    // never be counted as leaf task work — otherwise they double-count that time and
+                    // swamp the Top Tasks ranking and every task's SelfPercent.
+                    var isOrchestrationTask = taskSe.TaskName is "MSBuild" or "CallTarget";
+                    if (!isOrchestrationTask)
+                    {
+                        openTasks[(ctx.ProjectInstanceId, ctx.TaskId)] = allRawTasks.Count;
+                        allRawTasks.Add(new RawTaskTiming
                         {
-                            if (targetTimings[i].Id == targetId &&
-                                targetTimings[i].ProjectInstanceId == projInstanceId &&
-                                targetTimings[i].EndTime == default)
+                            TaskId = ctx.TaskId,
+                            ProjectInstanceId = ctx.ProjectInstanceId,
+                            TargetId = ctx.TargetId,
+                            Name = taskSe.TaskName ?? "Unknown",
+                            ProjectName = Path.GetFileNameWithoutExtension(taskSe.ProjectFile ?? ""),
+                            StartTime = taskSe.Timestamp,
+                        });
+                    }
+                    else
+                    {
+                        // Orchestration task tracking (for exclusive target time)
+                        runningOrchTasks[(ctx.ProjectInstanceId, ctx.TaskId)] = (
+                            ctx.TargetId,
+                            taskSe.Timestamp
+                        );
+                    }
+
+                    // Csc/Vbc task tracking (for ReportAnalyzer output)
+                    if (taskSe.TaskName is "Csc" or "Vbc")
+                    {
+                        activeCscTasks[(ctx.ProjectInstanceId, ctx.TaskId)] = new CscTaskAccumulator
+                        {
+                            ProjectName = Path.GetFileNameWithoutExtension(taskSe.ProjectFile ?? ""),
+                            StartTime = taskSe.Timestamp,
+                        };
+                    }
+                    break;
+                }
+
+                case TaskFinishedEventArgs taskFe:
+                {
+                    var ctx = taskFe.BuildEventContext;
+                    if (ctx is not { ProjectInstanceId: >= 0, TaskId: >= 0 })
+                        break;
+
+                    // Close the task timing (orchestration tasks were never added to allRawTasks).
+                    var taskKey = (ctx.ProjectInstanceId, ctx.TaskId);
+                    if (openTasks.Remove(taskKey, out var taskIndex)
+                        && allRawTasks[taskIndex].EndTime == default)
+                    {
+                        allRawTasks[taskIndex] = allRawTasks[taskIndex] with { EndTime = taskFe.Timestamp };
+                    }
+
+                    // Orchestration task duration (existing logic)
+                    if (taskFe.TaskName is "MSBuild" or "CallTarget")
+                    {
+                        if (runningOrchTasks.Remove(taskKey, out var info))
+                        {
+                            var duration = taskFe.Timestamp - info.StartTime;
+                            if (duration > TimeSpan.Zero)
                             {
-                                targetTimings[i] = targetTimings[i] with { EndTime = tfe.Timestamp };
-                                break;
+                                var orchKey = (ctx.ProjectInstanceId, info.TargetId);
+                                orchTaskDurations[orchKey] =
+                                    orchTaskDurations.GetValueOrDefault(orchKey) + duration;
                             }
                         }
-                        break;
                     }
 
-                case Microsoft.Build.Framework.TaskStartedEventArgs taskSe:
+                    // Close Csc/Vbc task accumulator and move to completed list
+                    if (taskFe.TaskName is "Csc" or "Vbc" &&
+                        activeCscTasks.Remove(taskKey, out var cscAcc))
                     {
-                        if (taskSe.TaskName is not ("MSBuild" or "CallTarget")) break;
-                        var ctx = taskSe.BuildEventContext;
-                        if (ctx is not { ProjectInstanceId: >= 0, TargetId: >= 0, TaskId: >= 0 }) break;
-                        runningOrchTasks[(ctx.ProjectInstanceId, ctx.TaskId)] = (ctx.TargetId, taskSe.Timestamp);
-                        break;
+                        cscAcc.EndTime = taskFe.Timestamp;
+                        completedCscTasks.Add(cscAcc);
                     }
+                    break;
+                }
 
-                case Microsoft.Build.Framework.TaskFinishedEventArgs taskFe:
+                case BuildMessageEventArgs msg:
+                {
+                    // Collect messages from Csc/Vbc tasks for ReportAnalyzer parsing
+                    var ctx = msg.BuildEventContext;
+                    if (ctx is { ProjectInstanceId: >= 0, TaskId: >= 0 } &&
+                        msg.Message is not null &&
+                        activeCscTasks.TryGetValue((ctx.ProjectInstanceId, ctx.TaskId), out var csc))
                     {
-                        if (taskFe.TaskName is not ("MSBuild" or "CallTarget")) break;
-                        var ctx = taskFe.BuildEventContext;
-                        if (ctx is not { ProjectInstanceId: >= 0, TaskId: >= 0 }) break;
-                        if (!runningOrchTasks.Remove((ctx.ProjectInstanceId, ctx.TaskId), out var info)) break;
-                        var duration = taskFe.Timestamp - info.StartTime;
-                        if (duration > TimeSpan.Zero)
-                        {
-                            var orchKey = (ctx.ProjectInstanceId, info.TargetId);
-                            orchTaskDurations[orchKey] = orchTaskDurations.GetValueOrDefault(orchKey) + duration;
-                        }
-                        break;
+                        csc.Messages.Add(msg.Message);
                     }
+                    break;
+                }
 
-                case Microsoft.Build.Framework.BuildErrorEventArgs:
+                case BuildErrorEventArgs:
                     errorCount++;
+
                     {
-                        var ctx = ((Microsoft.Build.Framework.BuildErrorEventArgs)record.Args).BuildEventContext;
+                        var ctx = ((BuildErrorEventArgs)record.Args).BuildEventContext;
                         var key = ctx?.ProjectInstanceId ?? -1;
                         if (key >= 0 && projectTimings.TryGetValue(key, out var acc))
                             acc.ErrorCount++;
                     }
                     break;
 
-                case Microsoft.Build.Framework.BuildWarningEventArgs:
+                case BuildWarningEventArgs warnEvent:
                     warningCount++;
+
                     {
-                        var ctx = ((Microsoft.Build.Framework.BuildWarningEventArgs)record.Args).BuildEventContext;
+                        var ctx = warnEvent.BuildEventContext;
                         var key = ctx?.ProjectInstanceId ?? -1;
                         if (key >= 0 && projectTimings.TryGetValue(key, out var acc))
                         {
                             acc.WarningCount++;
                             attributedWarningCount++;
                         }
+                        if (!string.IsNullOrEmpty(warnEvent.Code))
+                            warningCodeCounts[warnEvent.Code] = warningCodeCounts.GetValueOrDefault(warnEvent.Code) + 1;
                     }
                     break;
             }
         }
 
-        if (buildStart == DateTime.MaxValue) buildStart = DateTime.UtcNow;
-        if (buildEnd == DateTime.MinValue) buildEnd = buildStart;
+        if (buildStart == DateTime.MaxValue)
+            buildStart = DateTime.UtcNow;
+        if (buildEnd == DateTime.MinValue)
+            buildEnd = buildStart;
 
         var wallClock = buildEnd - buildStart;
 
@@ -230,37 +368,51 @@ public sealed class LogAnalyzer
             .GroupBy(t => instanceToPath[t.ProjectInstanceId])
             .ToDictionary(
                 g => g.Key,
-                g => (
-                    First: g.Min(t => t.StartTime) - buildStart,
-                    Last: g.Max(t => t.EndTime) - buildStart
-                )
+                g =>
+                    (
+                        First: g.Min(t => t.StartTime) - buildStart,
+                        Last: g.Max(t => t.EndTime) - buildStart
+                    )
             );
 
         // ── Project list ────────────────────────────────────────────────
         var projectList = projectTimings
             .Where(kv => kv.Value.EndTime > kv.Value.StartTime)
-            .Where(kv => !kv.Value.FullPath.EndsWith(".metaproj", StringComparison.OrdinalIgnoreCase) &&
-                         !kv.Value.FullPath.EndsWith(".sln", StringComparison.OrdinalIgnoreCase))
-            .Select(kv => (
-                InstanceId: kv.Key,
-                Acc: kv.Value,
-                ExclusiveTime: exclusiveProjectTimes.GetValueOrDefault(kv.Key)
-            ))
+            .Where(kv =>
+                !kv.Value.FullPath.EndsWith(".metaproj", StringComparison.OrdinalIgnoreCase)
+                && !kv.Value.FullPath.EndsWith(".sln", StringComparison.OrdinalIgnoreCase)
+            )
+            .Select(kv =>
+                (
+                    InstanceId: kv.Key,
+                    Acc: kv.Value,
+                    ExclusiveTime: exclusiveProjectTimes.GetValueOrDefault(kv.Key)
+                )
+            )
             .Where(x => x.ExclusiveTime > TimeSpan.FromMilliseconds(1))
             .GroupBy(x => x.Acc.FullPath)
             .Select(g =>
             {
                 var best = g.OrderByDescending(x => x.ExclusiveTime).First();
                 var span = projectWorkSpans.GetValueOrDefault(best.Acc.FullPath);
+                // Sum exclusive time across every instance that shares this path. A
+                // multi-targeted project runs one inner build per TFM (distinct
+                // ProjectInstanceId, same path) and each does real work, so the project's
+                // self time is their sum. Taking only the largest instance would undercount
+                // and clash with totalSelfMs, which sums all instances (the denominator below).
+                var selfTime = TimeSpan.FromMilliseconds(g.Sum(x => x.ExclusiveTime.TotalMilliseconds));
                 return new ProjectTiming
                 {
                     Name = best.Acc.Name,
                     FullPath = best.Acc.FullPath,
-                    SelfTime = best.ExclusiveTime,
+                    SelfTime = selfTime,
                     Succeeded = g.All(x => x.Acc.Succeeded),
                     ErrorCount = g.Sum(x => x.Acc.ErrorCount),
                     WarningCount = g.Sum(x => x.Acc.WarningCount),
-                    SelfPercent = totalSelfMs > 0 ? best.ExclusiveTime.TotalMilliseconds / totalSelfMs * 100 : 0,
+                    SelfPercent =
+                        totalSelfMs > 0
+                            ? selfTime.TotalMilliseconds / totalSelfMs * 100
+                            : 0,
                     StartOffset = span.First,
                     EndOffset = span.Last,
                     KindHeuristic = ProjectKindHeuristic.Classify(best.Acc.Name),
@@ -276,12 +428,18 @@ public sealed class LogAnalyzer
             .Select(g =>
             {
                 var best = g.OrderByDescending(t => t.ExclusiveDuration).First();
+                // Sum across TFM instances: the same target (e.g. CoreCompile) runs once per
+                // inner build, and the denominator totalSelfMs counts every one of them.
+                var selfTime = TimeSpan.FromMilliseconds(g.Sum(t => t.ExclusiveDuration.TotalMilliseconds));
                 return new TargetTiming
                 {
                     Name = best.Name,
                     ProjectName = best.ProjectName,
-                    SelfTime = best.ExclusiveDuration,
-                    SelfPercent = totalSelfMs > 0 ? best.ExclusiveDuration.TotalMilliseconds / totalSelfMs * 100 : 0,
+                    SelfTime = selfTime,
+                    SelfPercent =
+                        totalSelfMs > 0
+                            ? selfTime.TotalMilliseconds / totalSelfMs * 100
+                            : 0,
                     Category = TargetCategorizer.Categorize(best.Name),
                 };
             })
@@ -307,12 +465,18 @@ public sealed class LogAnalyzer
             .GroupBy(t => t.ProjectName, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(
                 g => g.Key,
-                g => (IReadOnlyDictionary<TargetCategory, TimeSpan>)g
-                    .GroupBy(t => t.Category)
-                    .ToDictionary(
-                        x => x.Key,
-                        x => TimeSpan.FromMilliseconds(x.Sum(t => t.SelfTime.TotalMilliseconds))),
-                StringComparer.OrdinalIgnoreCase);
+                g =>
+                    (IReadOnlyDictionary<TargetCategory, TimeSpan>)
+                        g.GroupBy(t => t.Category)
+                            .ToDictionary(
+                                x => x.Key,
+                                x =>
+                                    TimeSpan.FromMilliseconds(
+                                        x.Sum(t => t.SelfTime.TotalMilliseconds)
+                                    )
+                            ),
+                StringComparer.OrdinalIgnoreCase
+            );
 
         // ── Reference overhead stats ───────────────────────────────────
         var referenceOverhead = ComputeReferenceOverhead(allTargets, projectList);
@@ -320,11 +484,14 @@ public sealed class LogAnalyzer
         // ── Span-vs-self outliers ──────────────────────────────────────
         var spanOutliers = projectList
             .Where(p =>
-                p.Span.TotalSeconds >= SpanOutlierMinSpanSeconds &&
-                p.SelfTime.TotalMilliseconds > 0 &&
-                p.Span.TotalMilliseconds / p.SelfTime.TotalMilliseconds >= SpanOutlierMinRatio &&
-                (p.Span - p.SelfTime).TotalSeconds >= SpanOutlierMinGapSeconds)
-            .OrderByDescending(p => p.Span.TotalMilliseconds / Math.Max(1, p.SelfTime.TotalMilliseconds))
+                p.Span.TotalSeconds >= SpanOutlierMinSpanSeconds
+                && p.SelfTime.TotalMilliseconds > 0
+                && p.Span.TotalMilliseconds / p.SelfTime.TotalMilliseconds >= SpanOutlierMinRatio
+                && (p.Span - p.SelfTime).TotalSeconds >= SpanOutlierMinGapSeconds
+            )
+            .OrderByDescending(p =>
+                p.Span.TotalMilliseconds / Math.Max(1, p.SelfTime.TotalMilliseconds)
+            )
             .ToList();
 
         // ── Project count tax ──────────────────────────────────────────
@@ -334,43 +501,146 @@ public sealed class LogAnalyzer
         var rawEdgesReadOnly = rawEdges.ToDictionary(
             kv => kv.Key,
             kv => (IReadOnlyList<string>)kv.Value.ToList(),
-            StringComparer.OrdinalIgnoreCase);
+            StringComparer.OrdinalIgnoreCase
+        );
         var graph = DependencyGraphAnalyzer.Build(projectList, rawEdgesReadOnly);
         var depsMap = DependencyGraphAnalyzer.ToDependencyMap(projectList, rawEdgesReadOnly);
 
         // ── Critical path (always returns validation) ──────────────────
-        var (criticalPath, criticalPathTotal, cpValidation) =
-            CriticalPathAnalyzer.Compute(projectList, depsMap, wallClock, graph.IsUsable);
+        var (criticalPath, criticalPathTotal, cpValidation) = CriticalPathAnalyzer.Compute(
+            projectList,
+            depsMap,
+            wallClock,
+            graph.IsUsable
+        );
 
         // ── Drill-down: populate Targets + CategoryBreakdown for top N and critical path ──
         var drillDownPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var p in projectList.Take(DrillDownTopN)) drillDownPaths.Add(p.FullPath);
-        foreach (var p in criticalPath) drillDownPaths.Add(p.FullPath);
+        foreach (var p in projectList.Take(DrillDownTopN))
+            drillDownPaths.Add(p.FullPath);
+        foreach (var p in criticalPath)
+            drillDownPaths.Add(p.FullPath);
 
         if (drillDownPaths.Count > 0)
         {
             var targetsByProjectName = allTargets
                 .GroupBy(t => t.ProjectName, StringComparer.OrdinalIgnoreCase)
-                .ToDictionary(g => g.Key, g => g.OrderByDescending(t => t.SelfTime).Take(5).ToList(),
-                              StringComparer.OrdinalIgnoreCase);
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.OrderByDescending(t => t.SelfTime).Take(5).ToList(),
+                    StringComparer.OrdinalIgnoreCase
+                );
 
             for (int i = 0; i < projectList.Count; i++)
             {
-                if (!drillDownPaths.Contains(projectList[i].FullPath)) continue;
-                var targets = targetsByProjectName.GetValueOrDefault(projectList[i].Name) ?? new List<TargetTiming>();
-                var breakdown = categoryByProject.GetValueOrDefault(projectList[i].Name)
+                // CategoryBreakdown is a cheap lookup into the already-built categoryByProject
+                // map, so populate it for every project — the Top Consumers table renders more
+                // projects than the drill-down set, and its "Dominant" column reads this map
+                // (a blank cell would otherwise appear for consumers ranked below the top N).
+                // The heavier per-project Targets list stays scoped to the drill-down set.
+                var breakdown =
+                    categoryByProject.GetValueOrDefault(projectList[i].Name)
                     ?? new Dictionary<TargetCategory, TimeSpan>();
+                var targets = drillDownPaths.Contains(projectList[i].FullPath)
+                    ? targetsByProjectName.GetValueOrDefault(projectList[i].Name)
+                      ?? new List<TargetTiming>()
+                    : projectList[i].Targets;
                 projectList[i] = projectList[i] with
                 {
                     Targets = targets,
                     CategoryBreakdown = breakdown,
                 };
             }
+            var projectByPath = projectList
+                .GroupBy(p => p.FullPath, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
             criticalPath = criticalPath
-                .Select(cp => projectList.FirstOrDefault(p =>
-                    string.Equals(p.FullPath, cp.FullPath, StringComparison.OrdinalIgnoreCase)) ?? cp)
+                .Select(cp => projectByPath.GetValueOrDefault(cp.FullPath) ?? cp)
                 .ToList();
         }
+
+        // ── Task-level timing ──────────────────────────────────────────
+        // Resolve target names for each task and compute task self time
+        var targetNameLookup = new Dictionary<(int ProjectInstanceId, int TargetId), string>();
+        foreach (var t in targetTimings)
+            targetNameLookup.TryAdd((t.ProjectInstanceId, t.Id), t.Name);
+
+        // Total MSBuild-task time under the reference TFM-negotiation targets
+        // (_GetProjectReferenceTargetFrameworkProperties and its FromSolution sibling). This work is
+        // an orchestration task, deliberately kept out of the leaf-task list, so surface it explicitly
+        // for the TFM-negotiation finding. Both variants must be counted or solution-driven builds
+        // (which emit the FromSolution form) under-report.
+        var tfmNegotiationTotal = TimeSpan.FromMilliseconds(
+            orchTaskDurations
+                .Where(kv =>
+                {
+                    var name = targetNameLookup.GetValueOrDefault(kv.Key);
+                    return name == "_GetProjectReferenceTargetFrameworkProperties"
+                        || name == "_GetProjectReferenceTargetFrameworkPropertiesFromSolution";
+                })
+                .Sum(kv => kv.Value.TotalMilliseconds));
+
+        var completedTasks = allRawTasks.Where(t => t.EndTime > t.StartTime).ToList();
+        var totalTaskMs = completedTasks.Sum(t => t.Duration.TotalMilliseconds);
+
+        var taskTimingList = completedTasks
+            .Select(t => new TaskTiming
+            {
+                TaskName = t.Name,
+                TargetName = targetNameLookup.GetValueOrDefault((t.ProjectInstanceId, t.TargetId), "Unknown"),
+                ProjectName = t.ProjectName,
+                SelfTime = t.Duration,
+                SelfPercent = totalTaskMs > 0 ? t.Duration.TotalMilliseconds / totalTaskMs * 100 : 0,
+            })
+            .OrderByDescending(t => t.SelfTime)
+            .ToList();
+        var topTaskList = taskTimingList.Take(30).ToList();
+
+        // ── Analyzer reports (from ReportAnalyzer output in Csc messages) ──
+        // Also drain any still-active tasks (task finish event may have been missing)
+        completedCscTasks.AddRange(activeCscTasks.Values);
+        var analyzerReports = new List<AnalyzerReport>();
+        foreach (var acc in completedCscTasks)
+        {
+            if (acc.Messages.Count == 0) continue;
+            var cscWallTime = acc.EndTime > acc.StartTime ? acc.EndTime - acc.StartTime : TimeSpan.Zero;
+            var report = AnalyzerReportParser.Parse(acc.ProjectName, cscWallTime, acc.Messages);
+            if (report is not null) analyzerReports.Add(report);
+        }
+        // Merge per-TFM reports into one per project. A multi-targeted project emits one
+        // ReportAnalyzer block per inner build (same ProjectName); without merging, every
+        // consumer that keys by name — ProjectDiagnosisBuilder, the analyzer/generator findings,
+        // the JSON export — would drop all but one TFM (last-writer-wins) or emit split duplicates.
+        analyzerReports = MergeAnalyzerReportsByProject(analyzerReports);
+
+        // ── Project diagnoses ("Why is this slow?") ──
+        var projectDiagnoses = ProjectDiagnosisBuilder.Build(
+            projectList, analyzerReports, criticalPath, spanOutliers, taskTimingList);
+
+        var warningsByCode = warningCodeCounts
+            .Select(kv => new WarningCodeTally
+            {
+                Code = kv.Key,
+                Prefix = ExtractPrefix(kv.Key),
+                Count = kv.Value,
+            })
+            .OrderByDescending(t => t.Count)
+            .ToList();
+
+        // Scanning every project's .cs files is expensive on large solutions. The
+        // [GeneratedComInterface] usage check only matters where the ComInterfaceGenerator actually
+        // ran (per ReportAnalyzer), so restrict the walk to those projects — and skip it entirely
+        // when the generator is absent from the whole build.
+        var comGeneratorProjects = new HashSet<string>(
+            analyzerReports
+                .Where(r => r.Generators.Any(g => string.Equals(
+                    g.AssemblyName, "Microsoft.Interop.ComInterfaceGenerator", StringComparison.OrdinalIgnoreCase)))
+                .Select(r => r.ProjectName),
+            StringComparer.OrdinalIgnoreCase);
+        var comInterfaceUsages = comGeneratorProjects.Count == 0
+            ? (IReadOnlyList<string>)Array.Empty<string>()
+            : SourceAttributeScanner.FindGeneratedComInterfaceUsages(
+                projectList.Where(p => comGeneratorProjects.Contains(p.Name)));
 
         return new BuildReport
         {
@@ -381,8 +651,15 @@ public sealed class LogAnalyzer
             ErrorCount = errorCount,
             WarningCount = warningCount,
             AttributedWarningCount = attributedWarningCount,
+            WarningsByCode = warningsByCode,
+            GeneratedComInterfaceUsages = comInterfaceUsages,
             Projects = projectList,
             TopTargets = topTargetList,
+            TopTasks = topTaskList,
+            TfmNegotiationTotal = tfmNegotiationTotal,
+            SkipReasons = skipInfos,
+            AnalyzerReports = analyzerReports,
+            ProjectDiagnoses = projectDiagnoses,
             Context = new BuildContext
             {
                 Configuration = configuration,
@@ -390,7 +667,7 @@ public sealed class LogAnalyzer
                 MSBuildVersion = msBuildVersion,
                 OperatingSystem = operatingSystem,
                 Parallelism = parallelism,
-                RestoreObserved = restoreObserved ? true : (bool?)null,
+                RestoreObserved = restoreObserved ? true : null,
             },
             CategoryTotals = categoryTotals,
             ExecutedTargetCount = executedTargets,
@@ -411,9 +688,11 @@ public sealed class LogAnalyzer
     private static void ExtractProjectReferences(
         string projectFile,
         IEnumerable items,
-        Dictionary<string, HashSet<string>> rawEdges)
+        Dictionary<string, HashSet<string>> rawEdges
+    )
     {
-        if (string.IsNullOrEmpty(projectFile)) return;
+        if (string.IsNullOrEmpty(projectFile))
+            return;
 
         string? projectDir;
         string fromKey;
@@ -426,24 +705,28 @@ public sealed class LogAnalyzer
         {
             return;
         }
-        if (projectDir is null) return;
+        if (projectDir is null)
+            return;
 
         foreach (var raw in items)
         {
             string? itemType = null;
-            Microsoft.Build.Framework.ITaskItem? item = null;
+            ITaskItem? item = null;
 
             if (raw is DictionaryEntry entry)
             {
                 itemType = entry.Key as string;
-                item = entry.Value as Microsoft.Build.Framework.ITaskItem;
+                item = entry.Value as ITaskItem;
             }
 
-            if (itemType is null || item is null) continue;
-            if (!itemType.Equals("ProjectReference", StringComparison.Ordinal)) continue;
+            if (itemType is null || item is null)
+                continue;
+            if (!itemType.Equals("ProjectReference", StringComparison.Ordinal))
+                continue;
 
             var spec = item.ItemSpec;
-            if (string.IsNullOrEmpty(spec)) continue;
+            if (string.IsNullOrEmpty(spec))
+                continue;
 
             string resolved;
             try
@@ -465,11 +748,45 @@ public sealed class LogAnalyzer
         }
     }
 
+    // Collapse the per-inner-build (per-TFM) ReportAnalyzer blocks of each project into a single
+    // report, so a multi-targeted project is not split across duplicate rows or reduced to one TFM.
+    private static List<AnalyzerReport> MergeAnalyzerReportsByProject(List<AnalyzerReport> reports) =>
+        reports
+            .GroupBy(r => r.ProjectName, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.Count() == 1
+                ? g.First()
+                : new AnalyzerReport
+                {
+                    ProjectName = g.Key,
+                    TotalAnalyzerTime = TimeSpan.FromMilliseconds(g.Sum(r => r.TotalAnalyzerTime.TotalMilliseconds)),
+                    TotalGeneratorTime = TimeSpan.FromMilliseconds(g.Sum(r => r.TotalGeneratorTime.TotalMilliseconds)),
+                    CscWallTime = TimeSpan.FromMilliseconds(g.Sum(r => r.CscWallTime.TotalMilliseconds)),
+                    Analyzers = MergeAnalyzerEntries(g.SelectMany(r => r.Analyzers)),
+                    Generators = MergeAnalyzerEntries(g.SelectMany(r => r.Generators)),
+                })
+            .ToList();
+
+    private static IReadOnlyList<AnalyzerEntry> MergeAnalyzerEntries(IEnumerable<AnalyzerEntry> entries) =>
+        entries
+            .GroupBy(e => e.AssemblyName, StringComparer.Ordinal)
+            .Select(g => new AnalyzerEntry
+            {
+                AssemblyName = g.Key,
+                Time = TimeSpan.FromMilliseconds(g.Sum(e => e.Time.TotalMilliseconds)),
+                // Percent is a share of one compile; across merged TFMs the largest is the
+                // most representative single figure (summing could exceed 100%).
+                Percent = g.Max(e => e.Percent),
+            })
+            .OrderByDescending(e => e.Time)
+            .ToList();
+
     private static ReferenceOverheadStats? ComputeReferenceOverhead(
         List<TargetTiming> allTargets,
-        List<ProjectTiming> projects)
+        List<ProjectTiming> projects
+    )
     {
-        if (projects.Count == 0) return null;
+        if (projects.Count == 0)
+            return null;
 
         var refByProject = allTargets
             .Where(t => t.Category == TargetCategory.References)
@@ -477,25 +794,31 @@ public sealed class LogAnalyzer
             .ToDictionary(
                 g => g.Key,
                 g => TimeSpan.FromMilliseconds(g.Sum(t => t.SelfTime.TotalMilliseconds)),
-                StringComparer.OrdinalIgnoreCase);
+                StringComparer.OrdinalIgnoreCase
+            );
 
-        if (refByProject.Count == 0) return null;
+        if (refByProject.Count == 0)
+            return null;
 
         var total = TimeSpan.FromMilliseconds(refByProject.Values.Sum(v => v.TotalMilliseconds));
-        if (total <= TimeSpan.Zero) return null;
+        if (total <= TimeSpan.Zero)
+            return null;
 
         var totalSelfMs = projects.Sum(p => p.SelfTime.TotalMilliseconds);
         var pct = totalSelfMs > 0 ? total.TotalMilliseconds / totalSelfMs * 100 : 0;
 
         var paying = refByProject.Values.Where(v => v > TimeSpan.Zero).ToList();
-        var median = paying.Count == 0
-            ? TimeSpan.Zero
-            : paying.OrderBy(v => v).ElementAt(paying.Count / 2);
+        var median =
+            paying.Count == 0 ? TimeSpan.Zero : paying.OrderBy(v => v).ElementAt(paying.Count / 2);
 
         var top = refByProject
             .OrderByDescending(kv => kv.Value)
             .Take(10)
-            .Select(kv => new ReferenceOverheadProject { ProjectName = kv.Key, SelfTime = kv.Value })
+            .Select(kv => new ReferenceOverheadProject
+            {
+                ProjectName = kv.Key,
+                SelfTime = kv.Value,
+            })
             .ToList();
 
         return new ReferenceOverheadStats
@@ -512,20 +835,24 @@ public sealed class LogAnalyzer
     private static ProjectCountTaxStats ComputeProjectCountTax(
         List<ProjectTiming> projects,
         Dictionary<string, IReadOnlyDictionary<TargetCategory, TimeSpan>> categoryByProject,
-        List<ProjectTiming> spanOutliers)
+        List<ProjectTiming> spanOutliers
+    )
     {
         int refsExceedCompile = 0;
         int refsMajority = 0;
 
         foreach (var p in projects)
         {
-            if (!categoryByProject.TryGetValue(p.Name, out var cats)) continue;
+            if (!categoryByProject.TryGetValue(p.Name, out var cats))
+                continue;
             var refs = cats.GetValueOrDefault(TargetCategory.References).TotalMilliseconds;
             var compile = cats.GetValueOrDefault(TargetCategory.Compile).TotalMilliseconds;
             var selfMs = p.SelfTime.TotalMilliseconds;
 
-            if (refs > compile && refs > 0) refsExceedCompile++;
-            if (selfMs > 0 && refs / selfMs > 0.5) refsMajority++;
+            if (refs > compile && refs > 0)
+                refsExceedCompile++;
+            if (selfMs > 0 && refs / selfMs > 0.5)
+                refsMajority++;
         }
 
         var perKind = projects
@@ -536,8 +863,7 @@ public sealed class LogAnalyzer
                 var medianSelf = sorted[sorted.Count / 2].SelfTime;
                 var sortedSpan = g.OrderBy(p => p.Span.TotalMilliseconds).ToList();
                 var medianSpan = sortedSpan[sortedSpan.Count / 2].Span;
-                var ratios = g
-                    .Where(p => p.SelfTime.TotalMilliseconds > 0)
+                var ratios = g.Where(p => p.SelfTime.TotalMilliseconds > 0)
                     .Select(p => p.Span.TotalMilliseconds / p.SelfTime.TotalMilliseconds)
                     .OrderBy(r => r)
                     .ToList();
@@ -566,15 +892,17 @@ public sealed class LogAnalyzer
     }
 
     private static void CaptureBuildContext(
-        Microsoft.Build.Framework.BuildStartedEventArgs bse,
+        BuildStartedEventArgs bse,
         ref string? configuration,
         ref string? sdkVersion,
         ref string? msBuildVersion,
         ref string? operatingSystem,
-        ref int? parallelism)
+        ref int? parallelism
+    )
     {
         var env = bse.BuildEnvironment;
-        if (env is null) return;
+        if (env is null)
+            return;
 
         if (env.TryGetValue("MSBuildToolsVersion", out var mv) && !string.IsNullOrEmpty(mv))
             msBuildVersion = mv;
@@ -588,6 +916,14 @@ public sealed class LogAnalyzer
             configuration = cfg;
         if (env.TryGetValue("MSBuildNodeCount", out var nc) && int.TryParse(nc, out var p) && p > 0)
             parallelism = p;
+    }
+
+    private static string ExtractPrefix(string code)
+    {
+        // Leading ASCII letters form the prefix (CS, CA, IDE, NETSDK, NU, MSB, ...).
+        int i = 0;
+        while (i < code.Length && char.IsAsciiLetter(code[i])) i++;
+        return i == 0 ? "OTHER" : code[..i];
     }
 
     private sealed class ProjectAccumulator
@@ -612,5 +948,25 @@ public sealed class LogAnalyzer
         public DateTime EndTime { get; set; }
         public TimeSpan Duration => EndTime > StartTime ? EndTime - StartTime : TimeSpan.Zero;
         public TimeSpan ExclusiveDuration { get; set; }
+    }
+
+    private sealed record RawTaskTiming
+    {
+        public int TaskId { get; init; }
+        public int ProjectInstanceId { get; init; }
+        public int TargetId { get; init; }
+        public required string Name { get; init; }
+        public required string ProjectName { get; init; }
+        public DateTime StartTime { get; init; }
+        public DateTime EndTime { get; set; }
+        public TimeSpan Duration => EndTime > StartTime ? EndTime - StartTime : TimeSpan.Zero;
+    }
+
+    private sealed class CscTaskAccumulator
+    {
+        public required string ProjectName { get; init; }
+        public DateTime StartTime { get; init; }
+        public DateTime EndTime { get; set; }
+        public List<string> Messages { get; } = new();
     }
 }
