@@ -22,11 +22,13 @@ btanalyzer build path/to/MyApp.csproj
 # Release configuration, show top 10 results
 btanalyzer build -c Release -n 10
 
-# Export HTML report
+# Export HTML, JSON, or Markdown report (format inferred from extension)
 btanalyzer build -o report.html
-
-# Export JSON report
 btanalyzer build -o report.json
+btanalyzer build -o report.md
+
+# Analyze an existing binary log without building
+btanalyzer analyze build.binlog -o report.html
 
 # Pass extra arguments to dotnet build
 btanalyzer build --args "--no-restore"
@@ -35,15 +37,60 @@ btanalyzer build --args "--no-restore"
 btanalyzer build --keep-log
 ```
 
+## Commands
+
+- `btanalyzer build [project]` — build a project/solution with binary logging, then analyze.
+- `btanalyzer analyze <file.binlog>` — analyze a pre-existing binary log (e.g. a CI artifact) without building.
+
 ## Options
 
 | Option | Short | Default | Description |
 |--------|-------|---------|-------------|
-| `--configuration` | `-c` | `Debug` | Build configuration |
+| `--configuration` | `-c` | `Debug` | Build configuration (`build` only) |
 | `--top` | `-n` | `20` | Number of top results to display |
-| `--output` | `-o` | | Export report to file (`.html` or `.json`) |
-| `--keep-log` | | | Keep the `.binlog` file after analysis |
-| `--args` | | | Additional arguments passed to `dotnet build` |
+| `--output` | `-o` | | Export report to file (`.html`, `.json`, or `.md`) |
+| `--config` | | | Path to a `btanalyzer.json` (default: discovered near the project) |
+| `--compare` | | | Compare against a previously exported JSON report |
+| `--fail-on` | | | Exit non-zero for CI gating (see below) |
+| `--history` | | | Append a one-line run summary (JSONL) for trend tracking |
+| `--no-open` | | | Do not launch the browser after generating an HTML report |
+| `--incremental` | | | Allow incremental build (default: `--no-incremental`; `build` only) |
+| `--keep-log` | | | Keep the `.binlog` file after analysis (`build` only) |
+| `--args` | | | Additional arguments passed to `dotnet build` (`build` only) |
+
+## CI usage
+
+`--fail-on` gates a pipeline; the tool exits non-zero when any comma-separated rule trips:
+
+- `critical` — any Critical finding
+- `warning` — any Warning or Critical finding
+- `errors` — the build did not succeed cleanly
+- `wallclock:<seconds>` — wall-clock exceeds N seconds
+- `regression:<percent>` — worst of wall-clock/self-time regressed more than N% vs the `--compare` baseline
+
+```bash
+# Fail the build if any critical finding appears or self-time regresses > 10% vs a baseline
+btanalyzer build --compare baseline.json --fail-on critical,regression:10 -o report.md
+```
+
+## Configuration (`btanalyzer.json`)
+
+Optional. Discovered by walking up from the project directory, or set explicitly with `--config`.
+
+```json
+{
+  "heavyPackages": ["My.Company.HugeSdk"],
+  "thresholds": {
+    "largestShareCriticalPercent": 30,
+    "largestShareWarningPercent": 18,
+    "costlyResolvePackageAssetsSeconds": 4,
+    "tfmNegotiationAggregateSeconds": 120,
+    "warningsOnCriticalPathPerProject": 50
+  }
+}
+```
+
+Any field may be omitted; omitted fields keep their defaults. `heavyPackages` extends the built-in set.
 
 ## What it does
 

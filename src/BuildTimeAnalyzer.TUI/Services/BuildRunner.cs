@@ -10,36 +10,36 @@ public sealed class BuildRunner
 
     public async Task<BuildRunResult> RunAsync(
         string projectPath,
+        string binLogPath,
         string configuration,
         bool incremental,
         BuildOutputController outputController,
         IEnumerable<string> extraArgs,
         CancellationToken ct = default)
     {
-        var binLogPath = Path.Combine(Path.GetTempPath(), $"build-{Guid.NewGuid():N}.binlog");
-
-        // Default is --no-incremental so measurements are reproducible.
-        // Incremental builds skip most targets when nothing changed, which makes the numbers depend
-        // on prior build state rather than on the actual cost of your build.
-        var args = new List<string>
-        {
-            "build",
-            projectPath,
-            $"-c {configuration}",
-            $"-bl:\"{binLogPath}\"",
-            "-nologo",
-            "-p:ReportAnalyzer=true",
-            "-p:UseSharedCompilation=false",
-        };
-        if (!incremental) args.Add("--no-incremental");
-        args.AddRange(extraArgs);
-
-        var psi = new ProcessStartInfo("dotnet", string.Join(" ", args))
+        var psi = new ProcessStartInfo("dotnet")
         {
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
         };
+        // Build the argument vector element-by-element so paths and values containing spaces are
+        // escaped correctly by the runtime. Passing a single joined string (Arguments) would split
+        // "C:\My Projects\App.sln" into separate tokens and break the build.
+        psi.ArgumentList.Add("build");
+        psi.ArgumentList.Add(projectPath);
+        psi.ArgumentList.Add("-c");
+        psi.ArgumentList.Add(configuration);
+        psi.ArgumentList.Add($"-bl:{binLogPath}");
+        psi.ArgumentList.Add("-nologo");
+        psi.ArgumentList.Add("-p:ReportAnalyzer=true");
+        psi.ArgumentList.Add("-p:UseSharedCompilation=false");
+        // Default is --no-incremental so measurements are reproducible. Incremental builds skip most
+        // targets when nothing changed, making the numbers depend on prior build state rather than
+        // on the actual cost of your build.
+        if (!incremental) psi.ArgumentList.Add("--no-incremental");
+        foreach (var extra in extraArgs) psi.ArgumentList.Add(extra);
+
         // Force the compiler/CLI UI language to English. ReportAnalyzer output is parsed by
         // AnalyzerReportParser, which keys off English section labels and invariant-format numbers;
         // without this, a localized host emits translated labels / comma decimals and all
@@ -90,13 +90,37 @@ public sealed class BuildRunner
             Console.Error.WriteLine(e.Data);
         };
 
-        process.Start();
+        try
+        {
+            process.Start();
+        }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            outputController.Toggled -= OnToggled;
+            throw new InvalidOperationException(
+                "Could not start 'dotnet'. Ensure the .NET SDK is installed and on your PATH " +
+                $"(underlying error: {ex.Message}).", ex);
+        }
+
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
+
+        // On Ctrl-C, kill the whole build process tree so no orphaned MSBuild nodes survive.
+        using var reg = ct.Register(() =>
+        {
+            try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
+            catch { /* already gone */ }
+        });
 
         try
         {
             await process.WaitForExitAsync(ct);
+        }
+        catch (OperationCanceledException)
+        {
+            try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
+            catch { /* already gone */ }
+            throw;
         }
         finally
         {

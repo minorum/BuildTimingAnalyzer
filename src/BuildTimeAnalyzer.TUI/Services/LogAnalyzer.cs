@@ -594,7 +594,10 @@ public sealed class LogAnalyzer
             })
             .OrderByDescending(t => t.SelfTime)
             .ToList();
-        var topTaskList = taskTimingList.Take(30).ToList();
+        // Scale the task list with --top, but never below 30: the HTML per-project breakdown filters
+        // this list per project (top 3 projects × up to 5 tasks each), so shrinking it below the old
+        // fixed 30 would silently empty the breakdown for the 2nd/3rd projects on a low --top.
+        var topTaskList = taskTimingList.Take(Math.Max(_topTargets, 30)).ToList();
 
         // ── Analyzer reports (from ReportAnalyzer output in Csc messages) ──
         // Also drain any still-active tasks (task finish event may have been missing)

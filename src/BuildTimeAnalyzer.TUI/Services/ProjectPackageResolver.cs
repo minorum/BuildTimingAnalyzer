@@ -13,8 +13,10 @@ namespace BuildTimeAnalyzer.Services;
 public static class ProjectPackageResolver
 {
     // Packages that are commonly responsible for large build cost (source generators, huge
-    // transitive graphs, SDK framework references). Flagged in the UI when present.
-    private static readonly HashSet<string> HeavyPackages = new(StringComparer.OrdinalIgnoreCase)
+    // transitive graphs, SDK framework references). Flagged in the UI when present. This is a
+    // starter set biased toward common .NET stacks; a project's btanalyzer.json can extend it via
+    // ConfigureHeavyPackages so the "heavy package" signal is meaningful on any codebase.
+    private static readonly HashSet<string> BuiltInHeavyPackages = new(StringComparer.OrdinalIgnoreCase)
     {
         "Microsoft.EntityFrameworkCore",
         "Microsoft.EntityFrameworkCore.SqlServer",
@@ -28,6 +30,29 @@ public static class ProjectPackageResolver
         "OpenTelemetry",
         "Microsoft.Playwright",
     };
+
+    // Effective set = built-in ∪ user-configured. The CLI configures it once at startup before any
+    // resolution runs, but tests reconfigure/reset it and TUnit runs in parallel — so the field is
+    // volatile to publish the fully-built replacement set with a memory barrier. Each write assigns
+    // a brand-new set (never mutates the live one), so a concurrent reader sees either the old or the
+    // new set in full, never a half-populated one.
+    private static volatile HashSet<string> _heavyPackages = new(BuiltInHeavyPackages, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Extend the built-in heavy-package set with user-configured ids (from btanalyzer.json).</summary>
+    public static void ConfigureHeavyPackages(IEnumerable<string> extra)
+    {
+        var set = new HashSet<string>(BuiltInHeavyPackages, StringComparer.OrdinalIgnoreCase);
+        foreach (var id in extra)
+            if (!string.IsNullOrWhiteSpace(id)) set.Add(id.Trim());
+        _heavyPackages = set;
+    }
+
+    /// <summary>Reset the heavy-package set back to the built-in defaults (used by tests).</summary>
+    public static void ResetHeavyPackages() =>
+        _heavyPackages = new HashSet<string>(BuiltInHeavyPackages, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>True when a package id is in the effective heavy set.</summary>
+    public static bool IsHeavy(string id) => _heavyPackages.Contains(id);
 
     public static ProjectPackages? Resolve(string csprojPath)
     {
@@ -60,7 +85,7 @@ public static class ProjectPackageResolver
                     Id = id,
                     Version = version,
                     Source = PackageReferenceSource.Direct,
-                    IsKnownHeavy = HeavyPackages.Contains(id),
+                    IsKnownHeavy = IsHeavy(id),
                 });
             }
 
@@ -161,7 +186,7 @@ public static class ProjectPackageResolver
                         Version = version,
                         Source = PackageReferenceSource.Transitive,
                         ParentPackage = dependencyParents.GetValueOrDefault(id),
-                        IsKnownHeavy = HeavyPackages.Contains(id),
+                        IsKnownHeavy = IsHeavy(id),
                     });
                 }
             }
