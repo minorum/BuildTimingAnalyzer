@@ -133,6 +133,14 @@ public sealed class BuildComparisonTests
     }
 
     [Test]
+    public async Task ReadFromGit_BogusRevspec_ReturnsNull()
+    {
+        // Either git is missing (Process.Start throws → null) or the object doesn't exist (exit != 0 → null).
+        var snapshot = BuildSnapshot.ReadFromGit("no-such-ref-xyz:does-not-exist.json");
+        await Assert.That(snapshot).IsNull();
+    }
+
+    [Test]
     public async Task ReadFromJsonReport_MissingFile_ReturnsNull()
     {
         var snapshot = BuildSnapshot.ReadFromJsonReport(Path.Combine(Path.GetTempPath(), "does-not-exist.json"));

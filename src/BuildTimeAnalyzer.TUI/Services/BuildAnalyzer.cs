@@ -177,7 +177,11 @@ public static class BuildAnalyzer
             Title = $"Build under-parallelised: {achieved:F1}× of {available} available build node(s)",
             Severity = FindingSeverity.Warning,
             Confidence = FindingConfidence.Medium,
-            UpperBoundImpactPercent = recoverablePct,
+            // UpperBoundImpactPercent is contractually a share of total *self time* (it drives the
+            // impact ranking, which must compare like with like). The recoverable figure here is a
+            // share of *wall-clock*, a different base, so it stays in Measured/Evidence only and this
+            // field is left null rather than polluting the ranking and the JSON contract.
+            UpperBoundImpactPercent = null,
             Measured = $"Achieved parallelism {achieved:F1}× against {available} available node(s) ({capacityUsed * 100:F0}% of capacity). {chainSentence}",
             LikelyExplanation = "Low achieved parallelism means aggregate work did not overlap in time. Some of that is unavoidable (a project cannot start before its references finish); the rest is schedulable overhead that better scheduling or fewer serial stages could recover.",
             InvestigationSuggestion = suggestion,

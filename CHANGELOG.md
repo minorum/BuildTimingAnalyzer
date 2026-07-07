@@ -25,9 +25,29 @@ and a single impact-led ordering shared across every output.
   order, and numbered in that order. Markdown, HTML, JSON, and the "inspect next" list all read that
   single ordering instead of re-ranking independently.
 
+### New: SARIF output + GitHub Action
+- **SARIF export** (`-o report.sarif`) so findings upload to GitHub code scanning and appear as
+  inline PR annotations.
+- A **composite GitHub Action** (`action.yml`) that installs btanalyzer and runs it, so the
+  build → analyze → gate flow is a few lines of workflow.
+
+### New: baseline from git
+- `--compare git:<revspec>` reads a committed baseline JSON straight out of git
+  (e.g. `--compare git:origin/main:baseline.json`), so regression gating needs no artifact juggling.
+
+### New: config discoverability
+- `btanalyzer init` writes a default `btanalyzer.json`; `btanalyzer config` prints the effective
+  configuration.
+- Unknown keys in `btanalyzer.json` now produce a warning instead of being silently ignored.
+
 ### Configuration
 - New tunable thresholds in `btanalyzer.json`: `serializedBuildParallelismRatio`,
   `serializedBuildMinProjects`, `projectCountTaxMinProjects`, `projectCountTaxProjectSharePercent`.
+
+### Other
+- Heavy-package detection is now partly data-driven: a direct package that pulls in a large
+  transitive subtree is flagged even when it isn't in the curated list.
+- Markdown comparison now also lists top improvements, not just regressions.
 
 ## 0.0.15
 

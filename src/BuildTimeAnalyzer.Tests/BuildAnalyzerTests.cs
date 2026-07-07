@@ -265,9 +265,10 @@ public sealed class BuildAnalyzerTests
 
         await Assert.That(finding).IsNotNull();
         await Assert.That(finding!.Severity).IsEqualTo(FindingSeverity.Warning);
-        // Chain is 30s of 60s wall → 50% recoverable.
-        await Assert.That(finding.UpperBoundImpactPercent).IsNotNull();
-        await Assert.That(finding.UpperBoundImpactPercent!.Value).IsEqualTo(50).Within(0.5);
+        // Chain is 30s of 60s wall → up to 50% recoverable, reported in Measured. UpperBoundImpactPercent
+        // is a self-time share by contract, so it stays null for this wall-clock-based finding.
+        await Assert.That(finding.UpperBoundImpactPercent).IsNull();
+        await Assert.That(finding.Measured).Contains("50%");
     }
 
     [Test]

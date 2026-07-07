@@ -74,4 +74,32 @@ public sealed class BtaConfigTests
             ProjectPackageResolver.ResetHeavyPackages();
         }
     }
+
+    [Test]
+    public async Task Parse_UnknownKeys_ProduceWarnings()
+    {
+        var config = BtaConfig.Parse("""
+            { "heavyPackages": [], "typo": 1, "thresholds": { "notAThreshold": 5 } }
+            """);
+        await Assert.That(config.Warnings.Count).IsEqualTo(2);
+        await Assert.That(config.Warnings.Any(w => w.Contains("'typo'"))).IsTrue();
+        await Assert.That(config.Warnings.Any(w => w.Contains("thresholds.notAThreshold"))).IsTrue();
+    }
+
+    [Test]
+    public async Task Parse_KnownKeys_NoWarnings()
+    {
+        var config = BtaConfig.Parse("""{ "thresholds": { "largestShareWarningPercent": 12 } }""");
+        await Assert.That(config.Warnings.Count).IsEqualTo(0);
+    }
+
+    [Test]
+    public async Task DefaultTemplate_RoundTripsWithDefaultsAndNoWarnings()
+    {
+        var config = BtaConfig.Parse(Commands.ConfigCommand.BuildDefaultConfigJson());
+        await Assert.That(config.Warnings.Count).IsEqualTo(0);
+        await Assert.That(config.Thresholds.LargestShareCriticalPercent).IsEqualTo(25.0);
+        await Assert.That(config.Thresholds.SerializedBuildMinProjects).IsEqualTo(5);
+        await Assert.That(config.Thresholds.ProjectCountTaxProjectSharePercent).IsEqualTo(40.0);
+    }
 }

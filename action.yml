@@ -1,0 +1,48 @@
+name: 'btanalyzer'
+description: 'Analyze .NET build performance and optionally gate CI on regressions or findings.'
+branding:
+  icon: 'clock'
+  color: 'blue'
+
+inputs:
+  project:
+    description: 'Project or solution to build and analyze (default: current directory)'
+    required: false
+    default: ''
+  output:
+    description: 'Report output path; the extension picks the format (.sarif, .md, .json, .html)'
+    required: false
+    default: 'btanalyzer.sarif'
+  args:
+    description: 'Extra arguments passed to "btanalyzer build" (e.g. "--fail-on regression:10 --compare git:origin/main:baseline.json -c Release")'
+    required: false
+    default: ''
+  version:
+    description: 'btanalyzer release tag to install (default: latest)'
+    required: false
+    default: 'latest'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install btanalyzer
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        tag="${{ inputs.version }}"
+        if [ "$tag" = "latest" ]; then
+          tag="$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
+            https://api.github.com/repos/minorum/BuildTimingAnalyzer/releases/latest \
+            | grep -oP '"tag_name":\s*"\K[^"]+')"
+        fi
+        curl -fsSL \
+          "https://github.com/minorum/BuildTimingAnalyzer/releases/download/${tag}/btanalyzer-linux-x64-${tag}.tar.gz" \
+          -o /tmp/btanalyzer.tar.gz
+        mkdir -p /tmp/btanalyzer && tar -xzf /tmp/btanalyzer.tar.gz -C /tmp/btanalyzer
+        install -m 0755 "$(find /tmp/btanalyzer -name btanalyzer -type f | head -n1)" /usr/local/bin/btanalyzer
+
+    - name: Run btanalyzer
+      shell: bash
+      run: btanalyzer build ${{ inputs.project }} --no-open -o "${{ inputs.output }}" ${{ inputs.args }}

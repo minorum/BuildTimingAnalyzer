@@ -41,6 +41,8 @@ btanalyzer build --keep-log
 
 - `btanalyzer build [project]` — build a project/solution with binary logging, then analyze.
 - `btanalyzer analyze <file.binlog>` — analyze a pre-existing binary log (e.g. a CI artifact) without building.
+- `btanalyzer init [path]` — write a default `btanalyzer.json`.
+- `btanalyzer config` — print the effective configuration.
 
 ## Options
 
@@ -48,9 +50,9 @@ btanalyzer build --keep-log
 |--------|-------|---------|-------------|
 | `--configuration` | `-c` | `Debug` | Build configuration (`build` only) |
 | `--top` | `-n` | `20` | Number of top results to display |
-| `--output` | `-o` | | Export report to file (`.html`, `.json`, or `.md`) |
+| `--output` | `-o` | | Export report to file (`.html`, `.json`, `.md`, or `.sarif`) |
 | `--config` | | | Path to a `btanalyzer.json` (default: discovered near the project) |
-| `--compare` | | | Compare against a previously exported JSON report |
+| `--compare` | | | Compare against a JSON report; a file path or `git:<revspec>` (e.g. `git:origin/main:baseline.json`) |
 | `--fail-on` | | | Exit non-zero for CI gating (see below) |
 | `--history` | | | Append a one-line run summary (JSONL) for trend tracking |
 | `--no-open` | | | Do not launch the browser after generating an HTML report |
@@ -71,6 +73,31 @@ btanalyzer build --keep-log
 ```bash
 # Fail the build if any critical finding appears or self-time regresses > 10% vs a baseline
 btanalyzer build --compare baseline.json --fail-on critical,regression:10 -o report.md
+```
+
+### GitHub Action
+
+A composite action installs btanalyzer and runs it. Emit SARIF and upload it so findings show up as
+inline PR annotations:
+
+```yaml
+- uses: minorum/BuildTimingAnalyzer@v0.0.16
+  with:
+    project: MyApp.sln
+    output: btanalyzer.sarif
+    args: '--compare git:origin/main:baseline.json --fail-on regression:10'
+- uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: btanalyzer.sarif
+```
+
+Or write a Markdown report straight into the job summary:
+
+```yaml
+- uses: minorum/BuildTimingAnalyzer@v0.0.16
+  with:
+    output: summary.md
+- run: cat summary.md >> "$GITHUB_STEP_SUMMARY"
 ```
 
 ## Configuration (`btanalyzer.json`)

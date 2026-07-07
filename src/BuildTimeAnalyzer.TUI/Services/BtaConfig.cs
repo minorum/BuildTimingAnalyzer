@@ -18,7 +18,22 @@ public sealed record BtaConfig
 
     public AnalyzerThresholds Thresholds { get; init; } = AnalyzerThresholds.Default;
 
+    /// <summary>Non-fatal problems found while parsing (e.g. unknown keys). Surfaced to the user.</summary>
+    public IReadOnlyList<string> Warnings { get; init; } = [];
+
     public static BtaConfig Default { get; } = new();
+
+    private static readonly HashSet<string> KnownTopLevelKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "heavyPackages", "thresholds",
+    };
+
+    private static readonly HashSet<string> KnownThresholdKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "largestShareWarningPercent", "largestShareCriticalPercent", "costlyResolvePackageAssetsSeconds",
+        "tfmNegotiationAggregateSeconds", "warningsOnCriticalPathPerProject", "serializedBuildParallelismRatio",
+        "serializedBuildMinProjects", "projectCountTaxMinProjects", "projectCountTaxProjectSharePercent",
+    };
 
     /// <summary>
     /// Resolve and load config. An explicit path wins (returns <see cref="Default"/> if it does not
@@ -44,7 +59,41 @@ public sealed record BtaConfig
     {
         if (string.IsNullOrWhiteSpace(json)) return Default;
         var dto = JsonSerializer.Deserialize(json, BtaConfigJsonContext.Default.BtaConfigDto);
-        return dto is null ? Default : FromDto(dto);
+        var cfg = dto is null ? Default : FromDto(dto);
+        var warnings = CollectUnknownKeys(json);
+        return warnings.Count == 0 ? cfg : cfg with { Warnings = warnings };
+    }
+
+    // A typo'd key deserializes to nothing and is silently ignored by System.Text.Json, so scan the
+    // raw JSON and warn on unrecognised keys — the same "misconfiguration should be loud" stance as
+    // --fail-on. Non-fatal: the rest of the config still applies.
+    private static IReadOnlyList<string> CollectUnknownKeys(string json)
+    {
+        var warnings = new List<string>();
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return warnings;
+            foreach (var prop in doc.RootElement.EnumerateObject())
+            {
+                if (!KnownTopLevelKeys.Contains(prop.Name))
+                {
+                    warnings.Add($"unknown config key '{prop.Name}'");
+                }
+                else if (prop.Name.Equals("thresholds", StringComparison.OrdinalIgnoreCase)
+                         && prop.Value.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var th in prop.Value.EnumerateObject())
+                        if (!KnownThresholdKeys.Contains(th.Name))
+                            warnings.Add($"unknown threshold key 'thresholds.{th.Name}'");
+                }
+            }
+        }
+        catch
+        {
+            // malformed JSON is handled elsewhere (returns Default); no warnings to add here
+        }
+        return warnings;
     }
 
     /// <summary>Locate the config file to use, or null if none applies.</summary>
