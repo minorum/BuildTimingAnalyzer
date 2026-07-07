@@ -135,10 +135,8 @@ public static class BuildComparison
             .OrderByDescending(d => d.DeltaMs).Take(topN).ToList();
         var improvements = deltas.Where(d => d.DeltaMs < 0)
             .OrderBy(d => d.DeltaMs).Take(topN).ToList();
-        var added = curByKey.Where(kv => !baseByKey.ContainsKey(kv.Key))
-            .Select(kv => kv.Value.Name).OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
-        var removed = baseByKey.Where(kv => !curByKey.ContainsKey(kv.Key))
-            .Select(kv => kv.Value.Name).OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+        var added = DisplayNames(curByKey.Values.Where(p => !baseByKey.ContainsKey(Key(p))));
+        var removed = DisplayNames(baseByKey.Values.Where(p => !curByKey.ContainsKey(Key(p))));
 
         return new BuildComparisonResult
         {
@@ -153,6 +151,38 @@ public static class BuildComparison
             AddedProjects = added,
             RemovedProjects = removed,
         };
+    }
+
+    // Project short names for display. When the same short name occurs more than once (the same name
+    // in different folders), disambiguate by appending the parent directory so the added/removed
+    // lists can't conflate two distinct projects.
+    private static IReadOnlyList<string> DisplayNames(IEnumerable<SnapshotProject> projects)
+    {
+        var list = projects.ToList();
+        var counts = list
+            .GroupBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
+
+        return list
+            .Select(p => counts[p.Name] > 1 && ParentDir(p.FullPath) is { Length: > 0 } dir
+                ? $"{p.Name} ({dir})"
+                : p.Name)
+            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static string ParentDir(string? fullPath)
+    {
+        if (string.IsNullOrEmpty(fullPath)) return "";
+        try
+        {
+            var dir = Path.GetDirectoryName(fullPath);
+            return string.IsNullOrEmpty(dir) ? "" : Path.GetFileName(dir) ?? "";
+        }
+        catch
+        {
+            return "";
+        }
     }
 
     // Unrounded on purpose: --fail-on regression compares WorstRegressionPercent against the

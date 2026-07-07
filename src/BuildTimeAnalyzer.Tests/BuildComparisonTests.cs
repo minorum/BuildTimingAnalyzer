@@ -55,6 +55,26 @@ public sealed class BuildComparisonTests
     }
 
     [Test]
+    public async Task Compare_DisambiguatesAddedProjectsWithCollidingNames()
+    {
+        var baseline = new BuildSnapshot { Projects = [] };
+        var current = new BuildSnapshot
+        {
+            Projects =
+            [
+                new SnapshotProject { Name = "Common", SelfTimeMs = 100, FullPath = "/a/Common.csproj" },
+                new SnapshotProject { Name = "Common", SelfTimeMs = 200, FullPath = "/b/Common.csproj" },
+            ],
+        };
+
+        var result = BuildComparison.Compare(baseline, current);
+
+        await Assert.That(result.AddedProjects.Count).IsEqualTo(2);
+        await Assert.That(result.AddedProjects.Contains("Common (a)")).IsTrue();
+        await Assert.That(result.AddedProjects.Contains("Common (b)")).IsTrue();
+    }
+
+    [Test]
     public async Task WorstRegressionPercent_TakesTheLarger()
     {
         var baseline = Snapshot(1000, 1000);

@@ -31,9 +31,12 @@ public static class ProjectPackageResolver
         "Microsoft.Playwright",
     };
 
-    // Effective set = built-in ∪ user-configured. Mutable because the CLI configures it once at
-    // startup from btanalyzer.json before any resolution runs (single-shot process, no concurrency).
-    private static HashSet<string> _heavyPackages = new(BuiltInHeavyPackages, StringComparer.OrdinalIgnoreCase);
+    // Effective set = built-in ∪ user-configured. The CLI configures it once at startup before any
+    // resolution runs, but tests reconfigure/reset it and TUnit runs in parallel — so the field is
+    // volatile to publish the fully-built replacement set with a memory barrier. Each write assigns
+    // a brand-new set (never mutates the live one), so a concurrent reader sees either the old or the
+    // new set in full, never a half-populated one.
+    private static volatile HashSet<string> _heavyPackages = new(BuiltInHeavyPackages, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Extend the built-in heavy-package set with user-configured ids (from btanalyzer.json).</summary>
     public static void ConfigureHeavyPackages(IEnumerable<string> extra)
