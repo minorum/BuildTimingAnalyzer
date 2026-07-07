@@ -16,14 +16,9 @@ public static class BuildHistory
     {
         try
         {
-            var top = analysis.Findings
-                .OrderBy(f => f.Severity switch
-                {
-                    FindingSeverity.Critical => 0,
-                    FindingSeverity.Warning => 1,
-                    _ => 2,
-                })
-                .FirstOrDefault();
+            // Findings arrive in the analyzer's authoritative order (severity → impact → detection),
+            // so the first is the top finding — matching every other output.
+            var top = analysis.Findings.FirstOrDefault();
 
             var entry = new HistoryEntry
             {

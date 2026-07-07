@@ -75,4 +75,47 @@ public sealed class ProjectPackageResolverTests
             if (Directory.Exists(tempDir)) Directory.Delete(tempDir, recursive: true);
         }
     }
+
+    [Test]
+    public async Task Resolve_HighFanoutDirectPackage_IsFlaggedHeavy()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "btatest-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(tempDir, "obj"));
+        var csprojPath = Path.Combine(tempDir, "Sample.csproj");
+        try
+        {
+            File.WriteAllText(csprojPath, """
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <PackageReference Include="BigPkg" Version="1.0.0" />
+  </ItemGroup>
+</Project>
+""");
+
+            // BigPkg (not in the curated list) pulls in 15 transitive packages → data-driven heavy.
+            var deps = string.Join(", ", Enumerable.Range(0, 15).Select(i => $"\"Dep{i}\": \"1.0.0\""));
+            var entries = string.Join(", ", Enumerable.Range(0, 15)
+                .Select(i => $"\"Dep{i}/1.0.0\": {{ \"type\": \"package\" }}"));
+            File.WriteAllText(Path.Combine(tempDir, "obj", "project.assets.json"), $$"""
+{
+  "targets": {
+    "net10.0": {
+      "BigPkg/1.0.0": { "type": "package", "dependencies": { {{deps}} } },
+      {{entries}}
+    }
+  }
+}
+""");
+
+            var result = ProjectPackageResolver.Resolve(csprojPath);
+
+            await Assert.That(result!.Quality).IsEqualTo(ProjectDataQuality.Full);
+            var big = result.DirectPackages.First(p => p.Id == "BigPkg");
+            await Assert.That(big.IsKnownHeavy).IsTrue();
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir)) Directory.Delete(tempDir, recursive: true);
+        }
+    }
 }

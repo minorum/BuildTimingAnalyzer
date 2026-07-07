@@ -39,6 +39,9 @@ internal static class ReportPipeline
         // overrides.
         ProjectPackageResolver.ConfigureHeavyPackages(opts.Config.HeavyPackages);
 
+        foreach (var warning in opts.Config.Warnings)
+            Console.Error.WriteLine($"    config warning: {warning}");
+
         // ── Guard the binary log ────────────────────────────────────
         if (!File.Exists(opts.BinLogPath))
         {
@@ -97,7 +100,10 @@ internal static class ReportPipeline
         BuildComparisonResult? comparison = null;
         if (opts.ComparePath is { Length: > 0 })
         {
-            var baseline = BuildSnapshot.ReadFromJsonReport(opts.ComparePath);
+            // "git:<revspec>" reads a committed baseline via `git show`; anything else is a file path.
+            var baseline = opts.ComparePath.StartsWith("git:", StringComparison.Ordinal)
+                ? BuildSnapshot.ReadFromGit(opts.ComparePath["git:".Length..])
+                : BuildSnapshot.ReadFromJsonReport(opts.ComparePath);
             if (baseline is null)
                 Console.Error.WriteLine($"    (Could not read comparison baseline: {opts.ComparePath})");
             else
@@ -119,6 +125,7 @@ internal static class ReportPipeline
                     case "html": HtmlReportExporter.Export(report, outputPath, analysis); break;
                     case "json": JsonReportExporter.Export(report, outputPath, analysis); break;
                     case "md": MarkdownReportExporter.Export(report, outputPath, analysis, comparison); break;
+                    case "sarif": SarifReportExporter.Export(report, outputPath, analysis); break;
                 }
             }
             catch (Exception ex)
@@ -198,6 +205,7 @@ internal static class ReportPipeline
             {
                 ".json" => "json",
                 ".md" or ".markdown" => "md",
+                ".sarif" => "sarif",
                 _ => "html",
             };
             return (explicitPath, format);
@@ -249,14 +257,10 @@ internal static class ReportPipeline
         if (report.ErrorCount > 0) Console.Write($" | {report.ErrorCount} error(s)");
         Console.WriteLine();
 
-        var topFinding = analysis.Findings
-            .OrderBy(f => f.Severity switch
-            {
-                FindingSeverity.Critical => 0,
-                FindingSeverity.Warning => 1,
-                _ => 2,
-            })
-            .FirstOrDefault();
+        // BuildAnalyzer already emits findings in the single authoritative order (severity → impact →
+        // detection) and numbers them accordingly, so the first finding IS the top one. Re-sorting
+        // here would drop the impact tie-break and could disagree with the HTML/Markdown/JSON lead.
+        var topFinding = analysis.Findings.FirstOrDefault();
         if (topFinding is not null)
         {
             var label = topFinding.Severity switch
@@ -296,9 +300,9 @@ internal static class ReportPipeline
         }
     }
 
+    // Thin aliases over the shared formatters in ConsoleReportRenderer (single source of truth).
     private static string Fmt(TimeSpan ts) => ConsoleReportRenderer.FormatDuration(ts);
-    private static string FmtMs(long ms) => ConsoleReportRenderer.FormatDuration(TimeSpan.FromMilliseconds(Math.Abs(ms)));
-    private static string SignedMs(long ms) => (ms >= 0 ? "+" : "-") + FmtMs(ms);
-    private static string Signed(double v) => (v >= 0 ? "+" : "") + v.ToString("F1");
-    private static string Signed(int v) => (v >= 0 ? "+" : "") + v.ToString();
+    private static string SignedMs(long ms) => ConsoleReportRenderer.FormatSignedDuration(ms);
+    private static string Signed(double v) => ConsoleReportRenderer.FormatSignedPercent(v);
+    private static string Signed(int v) => ConsoleReportRenderer.FormatSignedInt(v);
 }

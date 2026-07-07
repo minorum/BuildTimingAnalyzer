@@ -1,3 +1,4 @@
+using System.Globalization;
 using BuildTimeAnalyzer.Models;
 
 namespace BuildTimeAnalyzer.Rendering;
@@ -15,6 +16,21 @@ public static class ConsoleReportRenderer
         if (ts.TotalMinutes < 1) return FormattableString.Invariant($"{ts.TotalSeconds:F2}s");
         return FormattableString.Invariant($"{(int)ts.TotalMinutes}m {ts.Seconds:D2}s");
     }
+
+    /// <summary>Absolute duration for a millisecond count (sign discarded — for magnitude cells).</summary>
+    public static string FormatDurationMs(long ms) => FormatDuration(TimeSpan.FromMilliseconds(Math.Abs(ms)));
+
+    /// <summary>Signed duration delta, e.g. "+2.50s" / "-500ms". The single source of truth for delta rendering.</summary>
+    public static string FormatSignedDuration(long deltaMs) =>
+        (deltaMs >= 0 ? "+" : "-") + FormatDurationMs(deltaMs);
+
+    /// <summary>Signed percentage to one decimal, e.g. "+10.4" / "-3.0".</summary>
+    public static string FormatSignedPercent(double value) =>
+        (value >= 0 ? "+" : "") + value.ToString("F1", CultureInfo.InvariantCulture);
+
+    /// <summary>Signed integer, e.g. "+3" / "-1".</summary>
+    public static string FormatSignedInt(int value) =>
+        (value >= 0 ? "+" : "") + value.ToString(CultureInfo.InvariantCulture);
 
     public static string CategoryLabel(TargetCategory category) => category switch
     {

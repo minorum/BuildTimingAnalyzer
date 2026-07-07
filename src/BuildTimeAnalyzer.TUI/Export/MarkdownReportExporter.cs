@@ -139,6 +139,23 @@ public static class MarkdownReportExporter
             }
             sb.AppendLine();
         }
+
+        if (c.Improvements.Count > 0)
+        {
+            sb.AppendLine("### Top improvements");
+            sb.AppendLine();
+            sb.AppendLine("| Project | Baseline | Current | Δ |");
+            sb.AppendLine("|---|--:|--:|--:|");
+            foreach (var d in c.Improvements)
+            {
+                sb.Append("| ").Append(Cell(d.Name))
+                  .Append(" | ").Append(FmtMs(d.BaselineMs))
+                  .Append(" | ").Append(FmtMs(d.CurrentMs))
+                  .Append(" | ").Append(SignedMs(d.DeltaMs)).Append(" (").Append(Signed(d.DeltaPercent)).Append("%)")
+                  .AppendLine(" |");
+            }
+            sb.AppendLine();
+        }
     }
 
     private static string DominantCategory(ProjectTiming p)
@@ -149,9 +166,10 @@ public static class MarkdownReportExporter
     }
 
     private static string Cell(string s) => s.Replace("|", "\\|");
+    // Thin aliases over the shared formatters in ConsoleReportRenderer (single source of truth).
     private static string Fmt(TimeSpan ts) => ConsoleReportRenderer.FormatDuration(ts);
-    private static string FmtMs(long ms) => ConsoleReportRenderer.FormatDuration(TimeSpan.FromMilliseconds(ms));
-    private static string SignedMs(long ms) => (ms >= 0 ? "+" : "-") + FmtMs(Math.Abs(ms));
-    private static string Signed(double v) => (v >= 0 ? "+" : "") + v.ToString("F1");
-    private static string Signed(int v) => (v >= 0 ? "+" : "") + v.ToString();
+    private static string FmtMs(long ms) => ConsoleReportRenderer.FormatDurationMs(ms);
+    private static string SignedMs(long ms) => ConsoleReportRenderer.FormatSignedDuration(ms);
+    private static string Signed(double v) => ConsoleReportRenderer.FormatSignedPercent(v);
+    private static string Signed(int v) => ConsoleReportRenderer.FormatSignedInt(v);
 }

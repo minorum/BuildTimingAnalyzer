@@ -41,6 +41,8 @@ btanalyzer build --keep-log
 
 - `btanalyzer build [project]` — build a project/solution with binary logging, then analyze.
 - `btanalyzer analyze <file.binlog>` — analyze a pre-existing binary log (e.g. a CI artifact) without building.
+- `btanalyzer init [path]` — write a default `btanalyzer.json`.
+- `btanalyzer config` — print the effective configuration.
 
 ## Options
 
@@ -48,9 +50,9 @@ btanalyzer build --keep-log
 |--------|-------|---------|-------------|
 | `--configuration` | `-c` | `Debug` | Build configuration (`build` only) |
 | `--top` | `-n` | `20` | Number of top results to display |
-| `--output` | `-o` | | Export report to file (`.html`, `.json`, or `.md`) |
+| `--output` | `-o` | | Export report to file (`.html`, `.json`, `.md`, or `.sarif`) |
 | `--config` | | | Path to a `btanalyzer.json` (default: discovered near the project) |
-| `--compare` | | | Compare against a previously exported JSON report |
+| `--compare` | | | Compare against a JSON report; a file path or `git:<revspec>` (e.g. `git:origin/main:baseline.json`) |
 | `--fail-on` | | | Exit non-zero for CI gating (see below) |
 | `--history` | | | Append a one-line run summary (JSONL) for trend tracking |
 | `--no-open` | | | Do not launch the browser after generating an HTML report |
@@ -73,6 +75,31 @@ btanalyzer build --keep-log
 btanalyzer build --compare baseline.json --fail-on critical,regression:10 -o report.md
 ```
 
+### GitHub Action
+
+A composite action installs btanalyzer and runs it. Emit SARIF and upload it so findings show up as
+inline PR annotations:
+
+```yaml
+- uses: minorum/BuildTimingAnalyzer@v0.0.16
+  with:
+    project: MyApp.sln
+    output: btanalyzer.sarif
+    args: '--compare git:origin/main:baseline.json --fail-on regression:10'
+- uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: btanalyzer.sarif
+```
+
+Or write a Markdown report straight into the job summary:
+
+```yaml
+- uses: minorum/BuildTimingAnalyzer@v0.0.16
+  with:
+    output: summary.md
+- run: cat summary.md >> "$GITHUB_STEP_SUMMARY"
+```
+
 ## Configuration (`btanalyzer.json`)
 
 Optional. Discovered by walking up from the project directory, or set explicitly with `--config`.
@@ -85,7 +112,11 @@ Optional. Discovered by walking up from the project directory, or set explicitly
     "largestShareWarningPercent": 18,
     "costlyResolvePackageAssetsSeconds": 4,
     "tfmNegotiationAggregateSeconds": 120,
-    "warningsOnCriticalPathPerProject": 50
+    "warningsOnCriticalPathPerProject": 50,
+    "serializedBuildParallelismRatio": 0.5,
+    "serializedBuildMinProjects": 5,
+    "projectCountTaxMinProjects": 10,
+    "projectCountTaxProjectSharePercent": 40
   }
 }
 ```
@@ -99,13 +130,16 @@ Any field may be omitted; omitted fields keep their defaults. `heavyPackages` ex
 3. Computes **exclusive** build times by subtracting orchestration task durations (MSBuild/CallTarget)
 4. Deduplicates projects by full path and targets by (name, project) pair
 5. Runs automated analysis with heuristic-based diagnostics:
-   - **Bottleneck projects** taking a disproportionate share of build time
-   - **Disproportionately slow projects** compared to the next-slowest
-   - **Project clusters** suggesting shared dependency chains
-   - **Dominant target types** (e.g. CoreCompile dominating top targets)
-   - **Unusually slow individual targets** (statistical outliers)
+   - **Bottleneck projects** taking a disproportionate share of build time, with how far ahead of the next-slowest they are
+   - **Under-parallelised builds** — achieved parallelism vs available build nodes, correlated with the critical path to bound recoverable wall-clock
+   - **Dependency cycles** in the ProjectReference graph
+   - **Project-count tax** — projects spending more time on references than compiling code
    - **Costly package resolution** (ResolvePackageAssets > 3s)
-   - **Warning concentration** across projects
+   - **Reference-TFM-negotiation overhead** across project edges
+   - **Warning concentration** on the blocking chain
+   - **Source-generator/analyzer outliers** (Gen.Logging, ComInterfaceGenerator, Roslyn analyzers in application projects)
+
+   Findings are ranked by severity, then by the share of build time they cover, so the report leads with what costs the most.
 
 ## Output formats
 

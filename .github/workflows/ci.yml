@@ -58,3 +58,46 @@ jobs:
 
       - name: Test
         run: dotnet test --solution ${{ env.SOLUTION }} --configuration Release --no-build
+
+  # Dogfood: run btanalyzer on this very solution and publish its findings as SARIF so they show up
+  # in code scanning. Informational only — it does not pass --fail-on, so it never blocks a PR on its
+  # own findings; it only fails if btanalyzer itself errors.
+  analyze-self:
+    name: Self-analysis (SARIF)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # required to upload SARIF to code scanning
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/Directory.Packages.props', '**/*.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Analyze this solution
+        run: dotnet run --project ${{ env.TUI_PROJECT }} --configuration Release -- build ${{ env.SOLUTION }} --no-open -o btanalyzer.sarif
+
+      - name: Upload SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@v3
+        # Fork PRs get a read-only token, so the upload would fail — keep it non-blocking there.
+        continue-on-error: true
+        with:
+          sarif_file: btanalyzer.sarif
+
+      - name: Upload SARIF as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: btanalyzer-sarif
+          path: btanalyzer.sarif
+          if-no-files-found: warn

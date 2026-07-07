@@ -54,6 +54,31 @@ public static class ProjectPackageResolver
     /// <summary>True when a package id is in the effective heavy set.</summary>
     public static bool IsHeavy(string id) => _heavyPackages.Contains(id);
 
+    // A direct package that pulls in at least this many transitive packages is treated as heavy even
+    // when it isn't in the curated set — a data-driven signal that generalises to any codebase.
+    private const int HeavyFanoutThreshold = 15;
+
+    /// <summary>
+    /// Promote direct packages to "heavy" when they introduce a large transitive subtree, so heaviness
+    /// isn't limited to the curated allowlist. Fan-out is the count of transitive packages whose
+    /// one-level parent is this direct package.
+    /// </summary>
+    private static List<PackageRef> ApplyFanoutHeaviness(List<PackageRef> direct, List<PackageRef>? transitive)
+    {
+        if (transitive is null || transitive.Count == 0) return direct;
+
+        var fanout = transitive
+            .Where(p => p.ParentPackage is not null)
+            .GroupBy(p => p.ParentPackage!, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
+
+        return direct
+            .Select(d => !d.IsKnownHeavy && fanout.TryGetValue(d.Id, out var n) && n >= HeavyFanoutThreshold
+                ? d with { IsKnownHeavy = true }
+                : d)
+            .ToList();
+    }
+
     public static ProjectPackages? Resolve(string csprojPath)
     {
         if (string.IsNullOrEmpty(csprojPath) || !File.Exists(csprojPath))
@@ -117,7 +142,7 @@ public static class ProjectPackageResolver
         return new ProjectPackages
         {
             Quality = transitive is null ? ProjectDataQuality.CsprojOnly : ProjectDataQuality.Full,
-            DirectPackages = direct,
+            DirectPackages = ApplyFanoutHeaviness(direct, transitive),
             TransitivePackages = transitive ?? [],
             ProjectReferences = projectRefs,
         };

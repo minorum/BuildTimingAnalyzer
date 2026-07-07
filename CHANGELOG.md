@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.0.16
+
+Deeper analysis: new findings from previously display-only signal, a sharper dominance finding,
+and a single impact-led ordering shared across every output.
+
+### New findings
+- **Under-parallelised build** — correlates achieved parallelism against the available build-node
+  count *and* the validated critical path. It separates unavoidable dependency-chain depth from
+  schedulable overhead and bounds the recoverable wall-clock (the gap between wall-clock and the
+  critical path), rather than just reporting a low number.
+- **Dependency cycles** — flags cycles in the ProjectReference graph (they defeat incremental
+  reuse), rendered as a closed loop `A → B → C → A`.
+- **Project-count tax** (Info) — fires when a large share of projects spend more self-time
+  resolving references than compiling code, the signature of an over-fragmented solution.
+
+### Sharper findings
+- The dominance finding now states how many times larger the top project is than the next-slowest,
+  so "dominates" is backed by concentration — a top project 4× ahead of the field reads differently
+  from one with a close runner-up.
+
+### Consistent ranking
+- Findings are now ranked once, in the analyzer, by severity then estimated impact then detection
+  order, and numbered in that order. Markdown, HTML, JSON, and the "inspect next" list all read that
+  single ordering instead of re-ranking independently.
+
+### New: SARIF output + GitHub Action
+- **SARIF export** (`-o report.sarif`) so findings upload to GitHub code scanning and appear as
+  inline PR annotations.
+- A **composite GitHub Action** (`action.yml`) that installs btanalyzer and runs it, so the
+  build → analyze → gate flow is a few lines of workflow.
+
+### New: baseline from git
+- `--compare git:<revspec>` reads a committed baseline JSON straight out of git
+  (e.g. `--compare git:origin/main:baseline.json`), so regression gating needs no artifact juggling.
+
+### New: config discoverability
+- `btanalyzer init` writes a default `btanalyzer.json`; `btanalyzer config` prints the effective
+  configuration.
+- Unknown keys in `btanalyzer.json` now produce a warning instead of being silently ignored.
+
+### Configuration
+- New tunable thresholds in `btanalyzer.json`: `serializedBuildParallelismRatio`,
+  `serializedBuildMinProjects`, `projectCountTaxMinProjects`, `projectCountTaxProjectSharePercent`.
+
+### Other
+- Heavy-package detection is now partly data-driven: a direct package that pulls in a large
+  transitive subtree is flagged even when it isn't in the curated list.
+- Markdown comparison now also lists top improvements, not just regressions.
+
 ## 0.0.15
 
 Hardening and CI-oriented features.

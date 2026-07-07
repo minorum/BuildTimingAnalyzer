@@ -20,6 +20,10 @@ try
             return await BuildCommand.RunAsync(args[1..]);
         case "analyze":
             return await AnalyzeCommand.RunAsync(args[1..]);
+        case "init":
+            return await ConfigCommand.RunInitAsync(args[1..]);
+        case "config":
+            return await ConfigCommand.RunPrintAsync(args[1..]);
         default:
             Console.Error.WriteLine($"Unknown command: {args[0]}");
             Console.Error.WriteLine("Run 'btanalyzer --help' for usage.");
@@ -52,6 +56,8 @@ static void PrintHelp()
     Console.WriteLine("COMMANDS:");
     Console.WriteLine("    build      Build and analyze a project or solution");
     Console.WriteLine("    analyze    Analyze an existing .binlog without building");
+    Console.WriteLine("    init       Write a default btanalyzer.json");
+    Console.WriteLine("    config     Print the effective configuration");
     Console.WriteLine();
     Console.WriteLine("OPTIONS:");
     Console.WriteLine("    -h, --help       Print help");

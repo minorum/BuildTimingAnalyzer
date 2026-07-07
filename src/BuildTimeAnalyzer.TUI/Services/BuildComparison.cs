@@ -41,29 +41,62 @@ public sealed record BuildSnapshot
     /// <summary>Read a snapshot from a JSON report previously written by <see cref="Export.JsonReportExporter"/>. Null on any error.</summary>
     public static BuildSnapshot? ReadFromJsonReport(string path)
     {
+        try { return FromJson(File.ReadAllText(path)); }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Read a baseline JSON report straight out of git via <c>git show &lt;revspec&gt;</c>
+    /// (e.g. <c>origin/main:baseline.json</c>), so CI can compare against a committed baseline without
+    /// juggling artifacts. Null if git is unavailable or the object doesn't exist.
+    /// </summary>
+    public static BuildSnapshot? ReadFromGit(string revSpec)
+    {
         try
         {
-            var dto = JsonSerializer.Deserialize(File.ReadAllText(path), ComparisonJsonContext.Default.SnapshotDto);
-            if (dto is null) return null;
-            return new BuildSnapshot
+            var psi = new System.Diagnostics.ProcessStartInfo("git")
             {
-                Project = dto.Project,
-                WallClockMs = dto.WallClockMs,
-                TotalSelfTimeMs = dto.TotalSelfTimeMs,
-                WarningCount = dto.WarningCount,
-                ErrorCount = dto.ErrorCount,
-                AchievedParallelism = dto.AchievedParallelism,
-                Succeeded = dto.Succeeded,
-                Projects = (dto.Projects ?? [])
-                    .Where(p => !string.IsNullOrEmpty(p.Name))
-                    .Select(p => new SnapshotProject { Name = p.Name!, SelfTimeMs = p.SelfTimeMs, FullPath = p.FullPath })
-                    .ToList(),
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
             };
+            psi.ArgumentList.Add("show");
+            psi.ArgumentList.Add(revSpec);
+
+            using var proc = System.Diagnostics.Process.Start(psi);
+            if (proc is null) return null;
+            // Drain BOTH streams concurrently before waiting: a chatty `git show` on stderr could
+            // otherwise fill the pipe buffer and deadlock the process (and this method) forever.
+            var stdout = proc.StandardOutput.ReadToEndAsync();
+            var stderr = proc.StandardError.ReadToEndAsync();
+            Task.WaitAll(stdout, stderr);
+            proc.WaitForExit();
+            return proc.ExitCode != 0 ? null : FromJson(stdout.GetAwaiter().GetResult());
         }
         catch
         {
             return null;
         }
+    }
+
+    private static BuildSnapshot? FromJson(string json)
+    {
+        var dto = JsonSerializer.Deserialize(json, ComparisonJsonContext.Default.SnapshotDto);
+        if (dto is null) return null;
+        return new BuildSnapshot
+        {
+            Project = dto.Project,
+            WallClockMs = dto.WallClockMs,
+            TotalSelfTimeMs = dto.TotalSelfTimeMs,
+            WarningCount = dto.WarningCount,
+            ErrorCount = dto.ErrorCount,
+            AchievedParallelism = dto.AchievedParallelism,
+            Succeeded = dto.Succeeded,
+            Projects = (dto.Projects ?? [])
+                .Where(p => !string.IsNullOrEmpty(p.Name))
+                .Select(p => new SnapshotProject { Name = p.Name!, SelfTimeMs = p.SelfTimeMs, FullPath = p.FullPath })
+                .ToList(),
+        };
     }
 }
 
