@@ -102,12 +102,22 @@ public static class BuildAnalyzer
         // 30% is a very different problem when the runner-up is at 5% (a genuine outlier worth
         // isolating) versus 27% (a broad-front cost where fixing one project barely moves the needle).
         var next = report.Projects[1];
-        var multiple = next.SelfTime.TotalMilliseconds > 0
-            ? top.SelfTime.TotalMilliseconds / next.SelfTime.TotalMilliseconds
-            : 0;
-        var gap = multiple >= 1.5
-            ? $" That is {multiple:F1}× the next-slowest ({next.Name}, {Fmt(next.SelfTime)}) — the cost is concentrated here."
-            : $" The next-slowest ({next.Name}, {Fmt(next.SelfTime)}) is close behind, so the cost is spread across several projects, not isolated to one.";
+        var nextMs = next.SelfTime.TotalMilliseconds;
+        string gap, multipleStr;
+        if (nextMs <= 0)
+        {
+            // A negligible runner-up means the cost is maximally concentrated — never "close behind".
+            gap = $" The next-slowest ({next.Name}) has negligible self time, so essentially all the cost is here.";
+            multipleStr = "inf";
+        }
+        else
+        {
+            var multiple = top.SelfTime.TotalMilliseconds / nextMs;
+            multipleStr = $"{multiple:F1}x";
+            gap = multiple >= 1.5
+                ? $" That is {multiple:F1}× the next-slowest ({next.Name}, {Fmt(next.SelfTime)}) — the cost is concentrated here."
+                : $" The next-slowest ({next.Name}, {Fmt(next.SelfTime)}) is close behind, so the cost is spread across several projects, not isolated to one.";
+        }
 
         findings.Add(new AnalysisFinding
         {
@@ -118,7 +128,7 @@ public static class BuildAnalyzer
             Measured = $"{top.Name}: {Fmt(top.SelfTime)} ({top.SelfPercent:F1}% of total).{gap}",
             LikelyExplanation = null,
             InvestigationSuggestion = $"Inspect {inspectTarget}.",
-            Evidence = $"SelfPercent={top.SelfPercent:F1}%, SelfTime={Fmt(top.SelfTime)}, NextMultiple={multiple:F1}x",
+            Evidence = $"SelfPercent={top.SelfPercent:F1}%, SelfTime={Fmt(top.SelfTime)}, NextMultiple={multipleStr}",
             ThresholdName = $"top-project-share > {t.LargestShareWarningPercent:F0}%",
             UpperBoundImpactPercent = top.SelfPercent,
         });

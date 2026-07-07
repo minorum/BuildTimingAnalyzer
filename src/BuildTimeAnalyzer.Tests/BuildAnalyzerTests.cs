@@ -224,6 +224,22 @@ public sealed class BuildAnalyzerTests
     }
 
     [Test]
+    public async Task LargestShare_ConcentratedWhenRunnerUpIsNegligible()
+    {
+        var projects = new List<ProjectTiming>
+        {
+            CreateProject("BigProject", 30, 60),
+            CreateProject("TinyProject", 0, 0),
+        };
+        var report = CreateReport(projects: projects);
+        var finding = BuildAnalyzer.Analyze(report).Findings.First(f => f.Title.Contains("dominates build time"));
+
+        // A 0ms runner-up must read as concentrated, never "close behind".
+        await Assert.That(finding.Measured).Contains("negligible self time");
+        await Assert.That(finding.Measured).DoesNotContain("close behind");
+    }
+
+    [Test]
     public async Task LargestShare_SpreadWhenNextIsClose()
     {
         var projects = new List<ProjectTiming>

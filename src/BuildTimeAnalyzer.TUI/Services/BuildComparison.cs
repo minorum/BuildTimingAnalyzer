@@ -65,9 +65,13 @@ public sealed record BuildSnapshot
 
             using var proc = System.Diagnostics.Process.Start(psi);
             if (proc is null) return null;
-            var json = proc.StandardOutput.ReadToEnd();
+            // Drain BOTH streams concurrently before waiting: a chatty `git show` on stderr could
+            // otherwise fill the pipe buffer and deadlock the process (and this method) forever.
+            var stdout = proc.StandardOutput.ReadToEndAsync();
+            var stderr = proc.StandardError.ReadToEndAsync();
+            Task.WaitAll(stdout, stderr);
             proc.WaitForExit();
-            return proc.ExitCode != 0 ? null : FromJson(json);
+            return proc.ExitCode != 0 ? null : FromJson(stdout.GetAwaiter().GetResult());
         }
         catch
         {
