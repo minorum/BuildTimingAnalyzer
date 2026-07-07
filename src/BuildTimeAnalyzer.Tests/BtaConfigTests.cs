@@ -34,6 +34,25 @@ public sealed class BtaConfigTests
     }
 
     [Test]
+    public async Task Parse_NewThresholds_AreBound()
+    {
+        var config = BtaConfig.Parse("""
+            {
+              "thresholds": {
+                "serializedBuildParallelismRatio": 0.7,
+                "serializedBuildMinProjects": 8,
+                "projectCountTaxMinProjects": 20,
+                "projectCountTaxProjectSharePercent": 55
+              }
+            }
+            """);
+        await Assert.That(config.Thresholds.SerializedBuildParallelismRatio).IsEqualTo(0.7);
+        await Assert.That(config.Thresholds.SerializedBuildMinProjects).IsEqualTo(8);
+        await Assert.That(config.Thresholds.ProjectCountTaxMinProjects).IsEqualTo(20);
+        await Assert.That(config.Thresholds.ProjectCountTaxProjectSharePercent).IsEqualTo(55.0);
+    }
+
+    [Test]
     public async Task Parse_CaseInsensitiveKeys()
     {
         var config = BtaConfig.Parse("""{ "HeavyPackages": ["X"] }""");

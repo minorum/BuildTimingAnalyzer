@@ -11,10 +11,16 @@ public sealed class BuildAnalyzerTests
         List<TargetTiming>? targets = null,
         int warningCount = 0,
         List<ProjectTiming>? criticalPath = null,
-        TimeSpan? criticalPathTotal = null)
+        TimeSpan? criticalPathTotal = null,
+        TimeSpan? totalSelfTime = null,
+        int? parallelism = null,
+        ProjectCountTaxStats? projectCountTax = null,
+        DependencyGraph? graph = null,
+        CriticalPathValidation? criticalPathValidation = null)
     {
         var duration = totalDuration ?? TimeSpan.FromSeconds(60);
         var start = new DateTime(2025, 1, 1, 12, 0, 0);
+        var projectList = projects ?? [];
         return new BuildReport
         {
             ProjectOrSolutionPath = "Test.sln",
@@ -26,24 +32,25 @@ public sealed class BuildAnalyzerTests
             AttributedWarningCount = warningCount,
             WarningsByCode = [],
             GeneratedComInterfaceUsages = [],
-            Projects = projects ?? [],
+            Projects = projectList,
             TopTargets = targets ?? [],
-            Context = new BuildContext(),
+            TotalSelfTime = totalSelfTime ?? TimeSpan.Zero,
+            Context = new BuildContext { Parallelism = parallelism },
             CategoryTotals = new Dictionary<TargetCategory, TimeSpan>(),
             ExecutedTargetCount = 0,
             SkippedTargetCount = 0,
             PotentiallyCustomTargets = [],
             ReferenceOverhead = null,
             SpanOutliers = [],
-            ProjectCountTax = TestDefaults.EmptyTax((projects ?? []).Count),
+            ProjectCountTax = projectCountTax ?? TestDefaults.EmptyTax(projectList.Count),
             TopTasks = [],
             SkipReasons = [],
             AnalyzerReports = [],
             ProjectDiagnoses = [],
-            Graph = TestDefaults.EmptyGraph((projects ?? []).Count),
+            Graph = graph ?? TestDefaults.EmptyGraph(projectList.Count),
             CriticalPath = criticalPath ?? [],
             CriticalPathTotal = criticalPathTotal ?? TimeSpan.Zero,
-            CriticalPathValidation = TestDefaults.EmptyValidation(),
+            CriticalPathValidation = criticalPathValidation ?? TestDefaults.EmptyValidation(),
         };
     }
 
@@ -197,6 +204,183 @@ public sealed class BuildAnalyzerTests
 
         for (int i = 0; i < result.Findings.Count; i++)
             await Assert.That(result.Findings[i].Number).IsEqualTo(i + 1);
+    }
+
+    // ────────────────────────── Largest-share gap ───────────────────
+
+    [Test]
+    public async Task LargestShare_ConcentratedWhenFarAheadOfNext()
+    {
+        var projects = new List<ProjectTiming>
+        {
+            CreateProject("BigProject", 30, 50),
+            CreateProject("SmallProject", 5, 8.3),
+        };
+        var report = CreateReport(projects: projects);
+        var finding = BuildAnalyzer.Analyze(report).Findings.First(f => f.Title.Contains("dominates build time"));
+
+        await Assert.That(finding.Measured).Contains("concentrated here");
+        await Assert.That(finding.Measured).Contains("6.0×");
+    }
+
+    [Test]
+    public async Task LargestShare_SpreadWhenNextIsClose()
+    {
+        var projects = new List<ProjectTiming>
+        {
+            CreateProject("BigProject", 20, 30),
+            CreateProject("RunnerUp", 18, 27),
+        };
+        var report = CreateReport(projects: projects);
+        var finding = BuildAnalyzer.Analyze(report).Findings.First(f => f.Title.Contains("dominates build time"));
+
+        await Assert.That(finding.Measured).Contains("spread across several projects");
+    }
+
+    // ────────────────────────── Serialized build ────────────────────
+
+    private static List<ProjectTiming> ManyProjects(int count) =>
+        Enumerable.Range(0, count).Select(i => CreateProject($"P{i}", 10, 100.0 / count)).ToList();
+
+    [Test]
+    public async Task SerializedBuild_DetectedWhenCapacityUnderused()
+    {
+        // 120s of work in 60s wall = 2× achieved against 8 available nodes = 25% of capacity.
+        var report = CreateReport(
+            totalDuration: TimeSpan.FromSeconds(60),
+            projects: ManyProjects(6),
+            parallelism: 8,
+            totalSelfTime: TimeSpan.FromSeconds(120),
+            criticalPathTotal: TimeSpan.FromSeconds(30),
+            criticalPathValidation: new CriticalPathValidation
+            {
+                ComputedTotal = TimeSpan.FromSeconds(30),
+                WallClock = TimeSpan.FromSeconds(60),
+                Accepted = true,
+                Reason = "test",
+                GraphWasUsable = true,
+            });
+        var finding = BuildAnalyzer.Analyze(report).Findings
+            .FirstOrDefault(f => f.Title.Contains("under-parallelised"));
+
+        await Assert.That(finding).IsNotNull();
+        await Assert.That(finding!.Severity).IsEqualTo(FindingSeverity.Warning);
+        // Chain is 30s of 60s wall → 50% recoverable.
+        await Assert.That(finding.UpperBoundImpactPercent).IsNotNull();
+        await Assert.That(finding.UpperBoundImpactPercent!.Value).IsEqualTo(50).Within(0.5);
+    }
+
+    [Test]
+    public async Task SerializedBuild_NotDetectedWhenParallelismUnknown()
+    {
+        var report = CreateReport(
+            projects: ManyProjects(6),
+            parallelism: null,
+            totalSelfTime: TimeSpan.FromSeconds(120));
+        await Assert.That(BuildAnalyzer.Analyze(report).Findings
+            .Any(f => f.Title.Contains("under-parallelised"))).IsFalse();
+    }
+
+    [Test]
+    public async Task SerializedBuild_NotDetectedWhenCapacityWellUsed()
+    {
+        // 300s of work in 60s = 5× achieved against 8 nodes = 62% of capacity → above the 50% floor.
+        var report = CreateReport(
+            projects: ManyProjects(6),
+            parallelism: 8,
+            totalSelfTime: TimeSpan.FromSeconds(300));
+        await Assert.That(BuildAnalyzer.Analyze(report).Findings
+            .Any(f => f.Title.Contains("under-parallelised"))).IsFalse();
+    }
+
+    // ────────────────────────── Dependency cycles ───────────────────
+
+    [Test]
+    public async Task DependencyCycles_DetectedAndRenderedAsLoop()
+    {
+        var graph = TestDefaults.EmptyGraph(3) with
+        {
+            Cycles = new List<IReadOnlyList<string>> { new List<string> { "A", "B", "C" } },
+        };
+        var report = CreateReport(projects: ManyProjects(3), graph: graph);
+        var finding = BuildAnalyzer.Analyze(report).Findings
+            .FirstOrDefault(f => f.Title.Contains("Dependency cycle"));
+
+        await Assert.That(finding).IsNotNull();
+        await Assert.That(finding!.Severity).IsEqualTo(FindingSeverity.Warning);
+        await Assert.That(finding.Measured).Contains("A → B → C → A");
+    }
+
+    [Test]
+    public async Task DependencyCycles_NotDetectedWhenNone()
+    {
+        var report = CreateReport(projects: ManyProjects(3));
+        await Assert.That(BuildAnalyzer.Analyze(report).Findings
+            .Any(f => f.Title.Contains("Dependency cycle"))).IsFalse();
+    }
+
+    // ────────────────────────── Project-count tax ───────────────────
+
+    [Test]
+    public async Task ProjectCountTax_DetectedAsInfoWhenReferencesDominate()
+    {
+        var tax = new ProjectCountTaxStats
+        {
+            ReferencesExceedCompileCount = 6,
+            ReferencesMajorityCount = 3,
+            TinySelfHugeSpanCount = 0,
+            TotalProjects = 12,
+            PerKindStats = [],
+        };
+        var report = CreateReport(projects: ManyProjects(12), projectCountTax: tax);
+        var finding = BuildAnalyzer.Analyze(report).Findings
+            .FirstOrDefault(f => f.Title.Contains("Reference overhead exceeds compile"));
+
+        await Assert.That(finding).IsNotNull();
+        await Assert.That(finding!.Severity).IsEqualTo(FindingSeverity.Info);
+        await Assert.That(finding.Measured).Contains("6 of 12");
+    }
+
+    [Test]
+    public async Task ProjectCountTax_NotDetectedBelowMinProjects()
+    {
+        var tax = new ProjectCountTaxStats
+        {
+            ReferencesExceedCompileCount = 4,
+            ReferencesMajorityCount = 2,
+            TinySelfHugeSpanCount = 0,
+            TotalProjects = 5,
+            PerKindStats = [],
+        };
+        var report = CreateReport(projects: ManyProjects(5), projectCountTax: tax);
+        await Assert.That(BuildAnalyzer.Analyze(report).Findings
+            .Any(f => f.Title.Contains("Reference overhead exceeds compile"))).IsFalse();
+    }
+
+    // ────────────────────────── Ranking ─────────────────────────────
+
+    [Test]
+    public async Task Findings_RankedByImpactWithinSeverity()
+    {
+        // Two Warning-level findings: the dominant-project one (50% impact) must outrank the
+        // Info-level project-count-tax finding, and Warnings precede Info regardless of impact.
+        var tax = new ProjectCountTaxStats
+        {
+            ReferencesExceedCompileCount = 8,
+            ReferencesMajorityCount = 4,
+            TinySelfHugeSpanCount = 0,
+            TotalProjects = 12,
+            PerKindStats = [],
+        };
+        var projects = new List<ProjectTiming> { CreateProject("Big", 30, 20) };
+        projects.AddRange(ManyProjects(11));
+        var report = CreateReport(projects: projects, projectCountTax: tax);
+        var findings = BuildAnalyzer.Analyze(report).Findings;
+
+        var infoIndex = findings.ToList().FindIndex(f => f.Severity == FindingSeverity.Info);
+        var warnIndex = findings.ToList().FindIndex(f => f.Severity == FindingSeverity.Warning);
+        await Assert.That(warnIndex).IsGreaterThanOrEqualTo(0);
+        await Assert.That(infoIndex).IsGreaterThan(warnIndex);
     }
 
     [Test]

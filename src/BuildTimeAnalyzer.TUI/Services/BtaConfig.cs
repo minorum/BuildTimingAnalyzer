@@ -83,6 +83,10 @@ public sealed record BtaConfig
                 CostlyResolvePackageAssetsSeconds = th.CostlyResolvePackageAssetsSeconds ?? t.CostlyResolvePackageAssetsSeconds,
                 TfmNegotiationAggregateSeconds = th.TfmNegotiationAggregateSeconds ?? t.TfmNegotiationAggregateSeconds,
                 WarningsOnCriticalPathPerProject = th.WarningsOnCriticalPathPerProject ?? t.WarningsOnCriticalPathPerProject,
+                SerializedBuildParallelismRatio = th.SerializedBuildParallelismRatio ?? t.SerializedBuildParallelismRatio,
+                SerializedBuildMinProjects = th.SerializedBuildMinProjects ?? t.SerializedBuildMinProjects,
+                ProjectCountTaxMinProjects = th.ProjectCountTaxMinProjects ?? t.ProjectCountTaxMinProjects,
+                ProjectCountTaxProjectSharePercent = th.ProjectCountTaxProjectSharePercent ?? t.ProjectCountTaxProjectSharePercent,
             };
         }
 
@@ -107,6 +111,10 @@ internal sealed class BtaThresholdsDto
     public double? CostlyResolvePackageAssetsSeconds { get; init; }
     public double? TfmNegotiationAggregateSeconds { get; init; }
     public int? WarningsOnCriticalPathPerProject { get; init; }
+    public double? SerializedBuildParallelismRatio { get; init; }
+    public int? SerializedBuildMinProjects { get; init; }
+    public int? ProjectCountTaxMinProjects { get; init; }
+    public double? ProjectCountTaxProjectSharePercent { get; init; }
 }
 
 [JsonSerializable(typeof(BtaConfigDto))]

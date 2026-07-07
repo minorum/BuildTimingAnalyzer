@@ -47,6 +47,8 @@ public static class BuildAnalyzer
         // BroadReferenceOverhead, OutlierTargets, ComInterfaceGenerator no-op — either too generic,
         // duplicates the blocking chain, or "no action needed" (trivia, not findings).
         DetectLargestShare(report, findings, t);
+        DetectSerializedBuild(report, findings, t);
+        DetectDependencyCycles(report, findings);
         DetectCostlyResolvePackageAssets(report, findings, t);
         DetectTfmNegotiationOverhead(report, findings, t);
         DetectBenchmarksOnCriticalPath(report, findings);
@@ -55,9 +57,12 @@ public static class BuildAnalyzer
         DetectComInterfaceGeneratorWithUsages(report, findings);
         DetectCSharpAnalyzersInNonRoslynProject(report, findings);
         DetectHeavyTransitivesInTestOrBenchmark(report, findings);
+        DetectProjectCountTax(report, findings, t);
 
-        // Severity order: Critical first, then Warning, then Info.
-        // Keep detection order within a severity so consecutive runs produce stable numbering.
+        // Ranking is the report's spine: Critical before Warning before Info, and within a severity
+        // the finding covering the most time first (UpperBoundImpactPercent). Detection order breaks
+        // ties so consecutive runs number identically. This ordering is authoritative — every consumer
+        // (Markdown, HTML, the "inspect next" list) reads findings in this order rather than re-ranking.
         var ordered = findings
             .Select((f, idx) => (f, idx))
             .OrderBy(x => x.f.Severity switch
@@ -66,6 +71,7 @@ public static class BuildAnalyzer
                 FindingSeverity.Warning => 1,
                 _ => 2,
             })
+            .ThenByDescending(x => x.f.UpperBoundImpactPercent ?? 0)
             .ThenBy(x => x.idx)
             .Select(x => x.f)
             .ToList();
@@ -92,18 +98,141 @@ public static class BuildAnalyzer
             ? $"{top.Name} — start with target {top.Targets[0].Name} ({Fmt(top.Targets[0].SelfTime)}, {CategoryLabel(top.Targets[0].Category)})"
             : $"{top.Name}";
 
+        // Gap-to-next quantifies how concentrated the cost is on this one project. A top project at
+        // 30% is a very different problem when the runner-up is at 5% (a genuine outlier worth
+        // isolating) versus 27% (a broad-front cost where fixing one project barely moves the needle).
+        var next = report.Projects[1];
+        var multiple = next.SelfTime.TotalMilliseconds > 0
+            ? top.SelfTime.TotalMilliseconds / next.SelfTime.TotalMilliseconds
+            : 0;
+        var gap = multiple >= 1.5
+            ? $" That is {multiple:F1}× the next-slowest ({next.Name}, {Fmt(next.SelfTime)}) — the cost is concentrated here."
+            : $" The next-slowest ({next.Name}, {Fmt(next.SelfTime)}) is close behind, so the cost is spread across several projects, not isolated to one.";
+
         findings.Add(new AnalysisFinding
         {
             Number = 0,
             Title = $"{top.Name} dominates build time",
             Severity = top.SelfPercent > t.LargestShareCriticalPercent ? FindingSeverity.Critical : FindingSeverity.Warning,
             Confidence = FindingConfidence.High,
-            Measured = $"{top.Name}: {Fmt(top.SelfTime)} ({top.SelfPercent:F1}% of total).",
+            Measured = $"{top.Name}: {Fmt(top.SelfTime)} ({top.SelfPercent:F1}% of total).{gap}",
             LikelyExplanation = null,
             InvestigationSuggestion = $"Inspect {inspectTarget}.",
-            Evidence = $"SelfPercent={top.SelfPercent:F1}%, SelfTime={Fmt(top.SelfTime)}",
+            Evidence = $"SelfPercent={top.SelfPercent:F1}%, SelfTime={Fmt(top.SelfTime)}, NextMultiple={multiple:F1}x",
             ThresholdName = $"top-project-share > {t.LargestShareWarningPercent:F0}%",
             UpperBoundImpactPercent = top.SelfPercent,
+        });
+    }
+
+    private static void DetectSerializedBuild(BuildReport report, List<AnalysisFinding> findings, AnalyzerThresholds t)
+    {
+        // Needs a known node budget to make a claim — MSBuildNodeCount is how many parallel build
+        // nodes MSBuild actually ran. Without it (or with a single node) there is no capacity to
+        // "under-use", so no finding.
+        var available = report.Context.Parallelism;
+        if (available is not > 1) return;
+        if (report.Projects.Count < t.SerializedBuildMinProjects) return;
+
+        var achieved = report.AchievedParallelism;
+        if (achieved <= 0) return;
+
+        var capacityUsed = achieved / available.Value;
+        if (capacityUsed >= t.SerializedBuildParallelismRatio) return;
+
+        // Correlate with the validated critical path to split unavoidable chain depth from schedulable
+        // overhead. You can never build faster than the longest dependency chain; the gap between
+        // wall-clock and that chain is the only genuinely recoverable time — that is the impact bound.
+        var wall = report.TotalDuration;
+        var cpAccepted = report.CriticalPathValidation.Accepted && report.CriticalPathTotal > TimeSpan.Zero;
+        double? recoverablePct = null;
+        string chainSentence, suggestion;
+
+        if (cpAccepted)
+        {
+            var cp = report.CriticalPathTotal;
+            var chainPct = wall.TotalMilliseconds > 0 ? cp.TotalMilliseconds / wall.TotalMilliseconds * 100 : 0;
+            recoverablePct = wall > cp ? (wall - cp).TotalMilliseconds / wall.TotalMilliseconds * 100 : 0;
+            var chainDepth = report.Graph.LongestChainProjectCount;
+
+            if (chainPct >= 80)
+            {
+                chainSentence = $"The blocking chain is {chainPct:F0}% of wall-clock, so the serialization is mostly the dependency chain itself ({chainDepth} projects deep) rather than schedulable overhead.";
+                suggestion = $"Shorten the longest dependency chain ({chainDepth} projects): merge thin pass-through projects or break the ProjectReference that forces the ordering. `dotnet build -graph` can also improve scheduling.";
+            }
+            else
+            {
+                chainSentence = $"The blocking chain is only {chainPct:F0}% of wall-clock, yet parallelism stayed at {achieved:F1}× — up to {recoverablePct:F0}% of wall-clock is schedulable work that never overlapped.";
+                suggestion = "Confirm the build ran multi-node (`-m`/`-maxcpucount`), check whether restore or a custom target serialized the graph, then compare against `dotnet build -graph`.";
+            }
+        }
+        else
+        {
+            chainSentence = "The critical path could not be validated, so the split between unavoidable chain depth and schedulable overhead is unknown.";
+            suggestion = "Confirm the build ran multi-node (`-m`), then run `dotnet build -graph` to expose scheduling stalls.";
+        }
+
+        findings.Add(new AnalysisFinding
+        {
+            Number = 0,
+            Title = $"Build under-parallelised: {achieved:F1}× of {available} available build node(s)",
+            Severity = FindingSeverity.Warning,
+            Confidence = FindingConfidence.Medium,
+            UpperBoundImpactPercent = recoverablePct,
+            Measured = $"Achieved parallelism {achieved:F1}× against {available} available node(s) ({capacityUsed * 100:F0}% of capacity). {chainSentence}",
+            LikelyExplanation = "Low achieved parallelism means aggregate work did not overlap in time. Some of that is unavoidable (a project cannot start before its references finish); the rest is schedulable overhead that better scheduling or fewer serial stages could recover.",
+            InvestigationSuggestion = suggestion,
+            Evidence = $"Achieved={achieved:F2}x, Available={available}, CapacityUsed={capacityUsed * 100:F0}%, CriticalPathAccepted={cpAccepted}",
+            ThresholdName = $"achieved/available < {t.SerializedBuildParallelismRatio:F2}",
+        });
+    }
+
+    private static void DetectDependencyCycles(BuildReport report, List<AnalysisFinding> findings)
+    {
+        if (!report.Graph.CycleDetectionRan) return;
+        if (report.Graph.Cycles.Count == 0) return;
+
+        var first = report.Graph.Cycles[0];
+        // Render the cycle as a closed loop (A → B → A) so the example reads as an actual cycle.
+        var loop = first.Count > 0
+            ? string.Join(" → ", first) + " → " + first[0]
+            : "(unavailable)";
+
+        findings.Add(new AnalysisFinding
+        {
+            Number = 0,
+            Title = $"Dependency cycle(s) among ProjectReferences: {report.Graph.Cycles.Count}",
+            Severity = FindingSeverity.Warning,
+            Confidence = FindingConfidence.High,
+            Measured = $"{report.Graph.Cycles.Count} cycle(s) detected in the ProjectReference graph. Example: {loop}.",
+            LikelyExplanation = null,
+            InvestigationSuggestion = $"Break the cycle — projects in a reference cycle cannot build independently and defeat incremental reuse. Start with: {loop}.",
+            Evidence = $"CycleCount={report.Graph.Cycles.Count}, Example={loop}",
+            ThresholdName = "any ProjectReference cycle",
+        });
+    }
+
+    private static void DetectProjectCountTax(BuildReport report, List<AnalysisFinding> findings, AnalyzerThresholds t)
+    {
+        var tax = report.ProjectCountTax;
+        if (tax.TotalProjects < t.ProjectCountTaxMinProjects) return;
+
+        var share = tax.TotalProjects > 0
+            ? (double)tax.ReferencesExceedCompileCount / tax.TotalProjects * 100
+            : 0;
+        if (share < t.ProjectCountTaxProjectSharePercent) return;
+
+        findings.Add(new AnalysisFinding
+        {
+            Number = 0,
+            Title = $"Reference overhead exceeds compile in {tax.ReferencesExceedCompileCount} of {tax.TotalProjects} projects",
+            Severity = FindingSeverity.Info,
+            Confidence = FindingConfidence.Low,
+            UpperBoundImpactPercent = null,
+            Measured = $"{tax.ReferencesExceedCompileCount} of {tax.TotalProjects} projects ({share:F0}%) spend more self-time resolving references than compiling code; {tax.ReferencesMajorityCount} spend the majority of their time there.",
+            LikelyExplanation = "A high reference-to-compile ratio across many projects is the signature of an over-fragmented solution: each project pays fixed per-project graph, restore, and reference overhead that can exceed the code it actually compiles. This is a structural signal about solution shape, not a defect in any single project.",
+            InvestigationSuggestion = "Review whether the thinnest libraries earn a separate project boundary — consolidating trivial projects removes fixed per-project overhead. Start with the projects where reference time most exceeds compile time.",
+            Evidence = $"RefsExceedCompile={tax.ReferencesExceedCompileCount}/{tax.TotalProjects}, RefsMajority={tax.ReferencesMajorityCount}",
+            ThresholdName = $"refs-exceed-compile share > {t.ProjectCountTaxProjectSharePercent:F0}% over >= {t.ProjectCountTaxMinProjects} projects",
         });
     }
 

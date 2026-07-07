@@ -23,5 +23,23 @@ public sealed record AnalyzerThresholds
     /// <summary>Per-project warning count on the blocking chain above which it is flagged.</summary>
     public int WarningsOnCriticalPathPerProject { get; init; } = 50;
 
+    /// <summary>
+    /// Fraction of available build nodes the achieved parallelism must fall below before the build
+    /// is flagged as under-parallelised (e.g. 0.5 → using less than half the available capacity).
+    /// </summary>
+    public double SerializedBuildParallelismRatio { get; init; } = 0.5;
+
+    /// <summary>Minimum project count before the serialized-build finding can fire (tiny solutions are noise).</summary>
+    public int SerializedBuildMinProjects { get; init; } = 5;
+
+    /// <summary>Minimum project count before the project-count-tax finding can fire.</summary>
+    public int ProjectCountTaxMinProjects { get; init; } = 10;
+
+    /// <summary>
+    /// Share (%) of projects spending more time on references than compile above which the
+    /// project-count-tax finding fires.
+    /// </summary>
+    public double ProjectCountTaxProjectSharePercent { get; init; } = 40.0;
+
     public static AnalyzerThresholds Default { get; } = new();
 }

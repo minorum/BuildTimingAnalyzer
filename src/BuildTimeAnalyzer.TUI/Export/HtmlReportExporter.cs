@@ -887,16 +887,10 @@ ftQ.addEventListener('click', function (e) { e.stopPropagation(); });
     // "What to inspect next — 5 items max."
     private const int MaxInspectNext = 5;
 
-    // Shared finding ranking: Critical → Warning → Info, then by upper-bound impact descending.
-    private static IEnumerable<AnalysisFinding> RankFindings(BuildAnalysis analysis) =>
-        analysis.Findings
-            .OrderBy(f => f.Severity switch
-            {
-                FindingSeverity.Critical => 0,
-                FindingSeverity.Warning => 1,
-                _ => 2,
-            })
-            .ThenByDescending(f => f.UpperBoundImpactPercent ?? 0);
+    // BuildAnalyzer already emits findings ranked Critical → Warning → Info, then by upper-bound
+    // impact descending, and numbers them in that order. Consume that order directly so the HTML,
+    // the finding numbers, and the Markdown/JSON outputs never disagree on which finding leads.
+    private static IEnumerable<AnalysisFinding> RankFindings(BuildAnalysis analysis) => analysis.Findings;
 
     /// <summary>
     /// Top bottlenecks section — strict three-line format per finding:
