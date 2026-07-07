@@ -23,7 +23,7 @@ public sealed class BuildComparisonTests
         var result = BuildComparison.Compare(baseline, current);
 
         await Assert.That(result.WallClockDeltaMs).IsEqualTo(200L);
-        await Assert.That(result.WallClockDeltaPercent).IsEqualTo(20.0);
+        await Assert.That(Math.Round(result.WallClockDeltaPercent, 1)).IsEqualTo(20.0);
         await Assert.That(result.TotalSelfTimeDeltaMs).IsEqualTo(100L);
     }
 
@@ -62,7 +62,7 @@ public sealed class BuildComparisonTests
 
         var result = BuildComparison.Compare(baseline, current);
 
-        await Assert.That(result.WorstRegressionPercent).IsEqualTo(30.0);
+        await Assert.That(Math.Round(result.WorstRegressionPercent, 1)).IsEqualTo(30.0);
     }
 
     [Test]

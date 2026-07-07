@@ -34,9 +34,10 @@ internal static class ReportPipeline
     public static async Task<int> RunAsync(Options opts)
     {
         // Configure the heavy-package set from config before any parsing (package resolution runs
-        // deep inside LogAnalyzer, so this must happen first).
-        if (opts.Config.HeavyPackages.Count > 0)
-            ProjectPackageResolver.ConfigureHeavyPackages(opts.Config.HeavyPackages);
+        // deep inside LogAnalyzer, so this must happen first). Always call it — even with an empty
+        // list it resets to the built-in set, so a second in-process run can't inherit a prior run's
+        // overrides.
+        ProjectPackageResolver.ConfigureHeavyPackages(opts.Config.HeavyPackages);
 
         // ── Guard the binary log ────────────────────────────────────
         if (!File.Exists(opts.BinLogPath))
@@ -131,8 +132,10 @@ internal static class ReportPipeline
         // ── History (best-effort) ───────────────────────────────────
         if (opts.HistoryPath is { Length: > 0 })
         {
-            BuildHistory.Append(opts.HistoryPath, report, analysis, DateTime.UtcNow);
-            Console.WriteLine($"    Appended run to history: {opts.HistoryPath}");
+            if (BuildHistory.Append(opts.HistoryPath, report, analysis, DateTime.UtcNow))
+                Console.WriteLine($"    Appended run to history: {opts.HistoryPath}");
+            else
+                Console.Error.WriteLine($"    (Could not write history file: {opts.HistoryPath})");
         }
 
         // ── Open in browser (HTML only) ─────────────────────────────
@@ -281,6 +284,10 @@ internal static class ReportPipeline
                 GC.Collect();
                 GC.WaitForPendingFinalizers();
                 await Task.Delay(200);
+            }
+            catch (IOException)
+            {
+                return; // final attempt still locked — leave the temp file, don't crash a good run
             }
             catch (UnauthorizedAccessException)
             {

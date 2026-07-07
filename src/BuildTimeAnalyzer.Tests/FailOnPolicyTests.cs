@@ -101,6 +101,18 @@ public sealed class FailOnPolicyTests
     }
 
     [Test]
+    public async Task Regression_JustAboveThreshold_Trips_NotSuppressedByRounding()
+    {
+        // +10.04% self-time regression. Must trip regression:10 — earlier the percent was rounded to
+        // 10.0 before the comparison, letting an at-threshold regression slip through.
+        var baseline = new BuildSnapshot { WallClockMs = 10000, TotalSelfTimeMs = 10000 };
+        var current = new BuildSnapshot { WallClockMs = 10000, TotalSelfTimeMs = 11004 };
+        var comparison = BuildComparison.Compare(baseline, current);
+        var result = FailOnPolicy.Evaluate("regression:10", SampleReports.Minimal(), Analysis(), comparison);
+        await Assert.That(result.Tripped).IsTrue();
+    }
+
+    [Test]
     public async Task Regression_BareRule_DefaultsToTenPercent()
     {
         var baseline = new BuildSnapshot { WallClockMs = 1000, TotalSelfTimeMs = 1000 };

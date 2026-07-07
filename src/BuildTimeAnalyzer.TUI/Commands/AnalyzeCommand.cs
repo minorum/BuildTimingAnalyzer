@@ -13,6 +13,7 @@ public static class AnalyzeCommand
     {
         var settings = ParseArgs(args);
         if (settings is null) return 1;
+        if (settings.HelpRequested) return 0;
 
         if (settings.BinLogPath is null or { Length: 0 })
         {
@@ -66,7 +67,8 @@ public static class AnalyzeCommand
             {
                 case "-h" or "--help":
                     PrintHelp();
-                    return null;
+                    settings.HelpRequested = true;
+                    return settings;
 
                 case "-n" or "--top":
                     if (++i >= args.Length) { Console.Error.WriteLine("Missing value for --top"); return null; }
@@ -148,4 +150,5 @@ internal sealed class AnalyzeCommandSettings
     public string? ComparePath { get; set; }
     public string? FailOn { get; set; }
     public string? HistoryPath { get; set; }
+    public bool HelpRequested { get; set; }
 }

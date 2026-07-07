@@ -11,7 +11,8 @@ namespace BuildTimeAnalyzer.Services;
 /// </summary>
 public static class BuildHistory
 {
-    public static void Append(string path, BuildReport report, BuildAnalysis analysis, DateTime timestampUtc)
+    /// <summary>Appends a run summary. Returns false (without throwing) if the write failed.</summary>
+    public static bool Append(string path, BuildReport report, BuildAnalysis analysis, DateTime timestampUtc)
     {
         try
         {
@@ -41,10 +42,12 @@ public static class BuildHistory
 
             var json = JsonSerializer.Serialize(entry, HistoryJsonContext.Default.HistoryEntry);
             File.AppendAllText(path, json + Environment.NewLine);
+            return true;
         }
         catch
         {
-            // History is a convenience, never a hard requirement — swallow.
+            // History is a convenience, never a hard requirement — report failure, don't throw.
+            return false;
         }
     }
 }

@@ -12,7 +12,8 @@ Hardening and CI-oriented features.
   binary log is cleaned up.
 - Build arguments are passed via `ProcessStartInfo.ArgumentList`, so project/solution paths and
   extra args containing spaces no longer break the build.
-- The top-tasks table now honours `--top` (previously hard-coded to 30).
+- The top-tasks list now scales with `--top` (previously hard-coded to 30), with a floor of 30 so
+  the HTML per-project task breakdown stays populated.
 
 ### New: analyze an existing binlog
 - `btanalyzer analyze <file.binlog>` runs the full report pipeline on a pre-existing binary log

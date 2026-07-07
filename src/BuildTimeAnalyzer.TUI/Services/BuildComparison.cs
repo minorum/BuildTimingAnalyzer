@@ -155,8 +155,11 @@ public static class BuildComparison
         };
     }
 
+    // Unrounded on purpose: --fail-on regression compares WorstRegressionPercent against the
+    // threshold, so rounding here (e.g. 10.04 → 10.0) would let an at-threshold regression slip
+    // through the gate. Every display site formats with "F1", so the precision is invisible in output.
     private static double Pct(long baseline, long current) =>
-        baseline > 0 ? Math.Round((double)(current - baseline) / baseline * 100, 1) : 0;
+        baseline > 0 ? (double)(current - baseline) / baseline * 100 : 0;
 }
 
 internal sealed class SnapshotDto
